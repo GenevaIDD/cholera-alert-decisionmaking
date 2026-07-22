@@ -1,0 +1,4252 @@
+---
+title: "Alert Utility Score"
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-fold: true
+    embed-resources: true
+    theme:
+      - custom.scss
+params:
+  testing: false
+  test_cntry: "COD"
+  remove_censored: false
+  evalperiod_code: "ew52"
+  delayperiod_code: "dw4"
+  ag_nweeks_code: "nweeks8"
+  incl_trend_alerts: true
+  impact_thresh: 300 
+  use_filtered_linked: true 
+  which_setting: "epidemic"
+  new_dpath: "../../main_ecl_dec2024/outputs"
+  plot_path: paste0(new_dpath, "/exploratory")
+  pre_path: "../../main_ecl_dec2024/inputs/" 
+  fig_path: "manuscript_figures"
+  use_iqr: false
+  ocv_status: "all"
+execute:
+  warning: false
+message: false
+cache: false
+---
+
+```{r}
+#| label: pkg-reinstall
+#| echo: false
+
+# detach("package:OutbreakExtractR", unload=TRUE)
+# devtools::document("../OutbreakExtractR")
+# install.packages("../OutbreakExtractR", type="source", repos=NULL)
+# params <- list(testing=FALSE)
+```
+
+```{r}
+#| label: setup
+#| echo: false
+
+## Load necessary libraries
+library(OutbreakExtractR)
+library(tidyverse)
+library(scales)
+library(sf)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(sf)
+library(giscoR)
+library(colorspace)
+library(ggnewscale)
+library(giscoR)
+library(patchwork)
+library(cowplot)
+
+## change pre_path and new_dpath to the locations where the preoutbreak time series and alert/outcome summary data are stored respectively
+new_dpath <- params$new_dpath
+plot_path <- params$plot_path
+pre_path <- params$pre_path
+fig_path <- params$fig_path
+
+testing <- params$testing ## process the testing dataset or full evaluation of outbreaks
+test_cntry <- if(testing){"COD"}
+remove_censored <- params$remove_censored ## whether to remove censored observations
+
+## set parameters for reading files
+evalperiod_code <- params$evalperiod_code
+delayperiod_code <- params$delayperiod_code ## delay period for base analyses
+ag_nweeks_code <- params$ag_nweeks_code
+
+## choose whether to use SD or IQR metrics
+use_iqr <- params$use_iqr
+
+## whether to run pipeline with all locations, vaccinated ones, or unvaccinated ones
+ocv_status <- params$ocv_status ## choose one of: "all", "vaccinated", "unvaccinated"
+
+```
+
+Updated `r Sys.Date()`
+
+`r paste("Testing is", testing, ifelse(testing, paste0("with test country ", test_cntry, "."), "so results are for the full dataset."))`
+
+Alertgroup `r ag_nweeks_code`; Delay period `r delayperiod_code`; Evaluation period `r evalperiod_code`
+
+```{css classDummyTable, echo=FALSE}
+
+.dummyTable .table thead {
+  visibility: collapse;
+}
+.dummyTable .table tbody {
+  visibility: collapse;
+}
+.dummyTable .table {
+  border-collapse: inherit;
+  padding-bottom: none;
+}
+.dummyTable .table.table.table-sm.table-striped.small {
+  margin: auto;
+}
+```
+
+```{r}
+#| label: funcs-reactable-template
+#| echo: false
+
+#' @description Generic function to prepare reactable
+#' @param print_table dataframe ready to be printed
+#' @param col_names character vector of column names
+#' @returns reactable
+reactable_template <- function(print_table, col_names){
+  reactable::reactable(print_table,
+                       columns = col_names,
+                       style = list(fontFamily = "sans-serif"),
+                       highlight = TRUE,
+                       striped = TRUE,
+                       compact = TRUE,
+                       filterable = TRUE,
+                       defaultPageSize = 20
+  )
+}
+```
+
+# Prepare Data
+
+Remove country-level data. Present results for a single population group (50k-500k) in main analysis. Other population groupings will go in supplement. Endemic locations are defined as those with at least 3 years of time series data and at least 50% of the weeks in the surveillance time series had non-zero suspected cholera cases.
+
+```{r}
+#| label: load-data
+#| echo: false
+
+## Set Parameters
+incl_trend_alerts <- params$incl_trend_alerts
+impact_thresh <- params$impact_thresh ## outcome threshold for ppv, missed outbreaks, delay
+use_filtered_linked <- params$use_filtered_linked ## TRUE for dataset that CA cleaned
+which_setting <- params$which_setting ## endemic, epidemic, all
+
+## Read Data
+alerts <- readr::read_rds(paste0(new_dpath, "/alerts.rds"))
+ags <- readr::read_rds(paste0(new_dpath, "/alert_groups_", ag_nweeks_code, ".rds"))
+evalC <- readr::read_rds(paste0(new_dpath, "/evaluation_cases_", delayperiod_code, "_", evalperiod_code, ".rds"))
+
+if(use_filtered_linked){
+  linked <- readr::read_rds(paste0(new_dpath, "/filtered_linked_outbreaks_alert_groups_", ag_nweeks_code, ".rds"))
+} else{
+  linked <- readr::read_rds(paste0(new_dpath, "/linked_outbreaks_alert_groups_", ag_nweeks_code, ".rds"))
+}
+
+pre_extract <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction.rds"))
+pre_extract <- dplyr::mutate(pre_extract, pop_brk = cut(pop, breaks = c(0, 50000, 500000, max(pre_extract$pop)), labels = c("<50k", "[50k, 500k)", "\U2265 500k"), include.lowest=T, right=FALSE))
+
+## optionally remove censored alerts for chosen delay value
+if (remove_censored) {
+
+  observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
+
+  ## keep only the delay corresponding to delayperiod_code
+  chosen_delay <- as.numeric(gsub("dw", "", delayperiod_code))
+
+  censored_alerts <- observed_weeks %>%
+    dplyr::filter(delay == chosen_delay, O_weeks < 52) %>%
+    dplyr::pull(alert_id) %>%
+    unique()
+
+  alerts  <- alerts  %>% dplyr::filter(!alert_id %in% censored_alerts)
+  ags     <- ags     %>% dplyr::filter(!alert_id %in% censored_alerts)
+  evalC   <- evalC   %>% dplyr::filter(!alert_id %in% censored_alerts)
+  linked  <- linked  %>% dplyr::filter(!alert_id %in% censored_alerts)
+}
+
+## % of locations with at least one alert for manuscript text
+
+pre_subnat <- pre_extract %>%
+  dplyr::filter(stringr::str_count(location, "::") > 1)
+
+total_locations <- pre_subnat %>%
+  dplyr::distinct(location) %>%
+  nrow()
+
+alert_locations <- alerts %>%
+  dplyr::filter(stringr::str_count(location, "::") > 1) %>%
+  dplyr::distinct(location)
+
+n_with_alert <- pre_subnat %>%
+  dplyr::distinct(location) %>%
+  dplyr::semi_join(alert_locations, by = "location") %>%
+  nrow()
+
+pct_with_alert <- round(100 * n_with_alert / total_locations, 1)
+alert_text <- glue::glue(
+  "{pct_with_alert}% (n = {n_with_alert}) of subnational locations ",
+  "reported at least one alert of any definition."
+)
+alert_text
+
+
+number_of_countries <- length(unique(pre_subnat$country))
+country_text <- glue::glue(
+  "(n = {number_of_countries}) number of countries"
+)
+
+country_text
+
+```
+
+The following locations are include in this report: `r which_setting`
+
+```{r}
+#| label: clean-base-data
+#| echo: false
+
+alerts_cl <- OutbreakExtractR::add_pop3_adm_columns(alerts, pre_extract) %>%
+  OutbreakExtractR::add_country_column() %>%
+  OutbreakExtractR::filter_ms_data(which_setting = which_setting)
+ags_cl <- OutbreakExtractR::add_pop3_adm_columns(ags, pre_extract) %>%
+  OutbreakExtractR::add_country_column() %>%
+  OutbreakExtractR::filter_ms_data(which_setting = which_setting)
+evalC_cl <- OutbreakExtractR::add_pop3_adm_columns(evalC, pre_extract) %>%
+  OutbreakExtractR::add_alert_columns(alerts) %>%
+  OutbreakExtractR::filter_ms_data(which_setting = which_setting)
+
+```
+Filtering alert locations according to ocv status selection
+
+```{r}
+#| label: filter-locations-by-ocv-status
+#| eval: !expr params$ocv_status %in% c("vaccinated", "unvaccinated")
+ocv <- read_csv(paste0(pre_path, "/gtfcc_request_timeline_2026-04-02.csv")) %>%
+  filter(`Event Type` == "Round") %>%
+  mutate(
+    ISO3 = if_else(Country == "DR Congo", "COD", ISO3),
+    date_round = Date
+  ) %>%
+  select(ISO3, date_round)
+
+alerts_window <- ags_cl %>%
+  select(alert_id, country, alert_number, TL_first_alert) %>%
+  distinct() %>%
+  left_join(
+    evalC_cl %>%
+      select(alert_id, evaluation_end_date),
+    by = "alert_id"
+  ) %>%
+  mutate(
+    start_window = TL_first_alert - weeks(52),
+    end_window = evaluation_end_date
+  )
+
+## link OCV campaigns to alerts
+alerts_with_ocv <- alerts_window %>%
+  left_join(ocv, by = c("country" = "ISO3")) %>%
+  mutate(
+    in_window = date_round >= start_window & date_round <= end_window
+  ) %>%
+  group_by(alert_id) %>%
+  summarise(
+    vaccinated = any(in_window, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+evalC_cl <- evalC_cl %>%
+  left_join(alerts_with_ocv, by = "alert_id")
+
+evalC_full <- evalC_cl
+
+eval_vaccinated <- evalC_cl %>%
+  filter(vaccinated == TRUE)
+
+eval_nonvaccinated <- evalC_cl %>%
+  filter(vaccinated == FALSE | is.na(vaccinated))
+
+table(evalC_cl$vaccinated, useNA = "ifany")
+
+## proportion vaccinated
+mean(evalC_cl$vaccinated, na.rm = TRUE)
+
+## run the rest of the utility pipeline
+if (ocv_status == "unvaccinated"){
+  evalC_cl <- eval_nonvaccinated %>%
+    select(-vaccinated)
+
+  linked <- linked %>%
+    dplyr::filter(!alert_id %in% eval_nonvaccinated$alert_id)
+
+} else if (ocv_status == "vaccinated"){
+  evalC_cl <- eval_vaccinated %>%
+    select(-vaccinated)
+
+  linked <- linked %>%
+    dplyr::filter(!alert_id %in% eval_vaccinated$alert_id)
+
+} else {
+  evalC_cl <- evalC_cl %>%
+    select(-vaccinated)
+}
+
+```
+
+```{r, eval: ocv_status %in% c("vaccinated", "unvaccinated")}
+#| echo: false
+#| message: false
+#| warning: false
+
+summary_stats <- evalC_full %>%   
+  summarise(
+    n_alerts = n(),
+    n_vaccinated = sum(vaccinated, na.rm = TRUE),
+    pct_vaccinated = 100 * mean(vaccinated, na.rm = TRUE)
+  )
+
+n_alerts <- summary_stats$n_alerts
+pct_vaccinated <- summary_stats$pct_vaccinated
+
+cat(
+  paste0(
+    "Out of ", n_alerts, " alerts, ",
+    round(pct_vaccinated, 1),
+    "% occurred during periods overlapping with OCV campaign rounds."
+  )
+)
+
+summary_stats
+```
+
+
+```{r}
+#| label: location-map
+#| echo: true
+#| message: false
+#| warning: false
+#| eval: true
+
+outbreak_shapes <- readr::read_rds(
+  file.path(pre_path, "outbreak_shapefiles.rds")
+)
+
+if (!inherits(outbreak_shapes, "sf")) {
+  outbreak_shapes <- sf::st_as_sf(outbreak_shapes)
+}
+
+if (is.na(sf::st_crs(outbreak_shapes))) {
+  sf::st_crs(outbreak_shapes) <- 4326
+} else if (sf::st_crs(outbreak_shapes) != sf::st_crs(4326)) {
+  outbreak_shapes <- sf::st_transform(outbreak_shapes, 4326)
+}
+
+africa <- giscoR::gisco_get_countries(
+  region = "Africa",
+  resolution = "3"
+)
+
+shape_join <- outbreak_shapes %>%
+  left_join(
+    pre_extract %>%
+      select(location_period_id, location),
+    by = c("lctn_pr" = "location_period_id")
+  )
+if (which_setting == "endemic") {
+
+  # Load endemic dataset from package
+  data("endemic_locs_gte50nz_3ydata", package = "OutbreakExtractR")
+
+  # Alert-linked locations
+  alert_locations <- alerts_cl %>%
+    dplyr::filter(alert_id %in% evalC_cl$alert_id) %>%
+    dplyr::distinct(location) %>%
+    dplyr::pull(location)
+
+  # Keep only endemic locations that also have alerts
+  endemic_alert_locs <- endemic_locs_gte50nz_3ydata %>%
+    dplyr::filter(location %in% alert_locations) %>%
+    dplyr::distinct(location)
+
+  endemic_sf <- endemic_alert_locs %>%
+    dplyr::left_join(shape_join, by = "location") %>%
+    dplyr::distinct(location, .keep_all = TRUE) %>%
+    sf::st_as_sf() %>%
+    sf::st_make_valid()
+
+  # Derive spatial scale from number of "::" separators in location
+  endemic_sf <- endemic_sf %>%
+    dplyr::mutate(
+      n_levels = stringr::str_count(location, "::") + 1,
+      scale_group = dplyr::case_when(
+        n_levels == 1 ~ "Admin0",
+        n_levels == 2 ~ "Admin1",
+        n_levels == 3 ~ "Admin2",
+        n_levels >= 4 ~ "Admin3",
+        TRUE ~ NA_character_
+      ),
+      scale_group = factor(
+        scale_group,
+        levels = c("Admin0", "Admin1", "Admin2", "Admin3")
+      )
+    )
+
+  scale_colors <- c(
+    "Admin0" = "lightblue0",
+    "Admin1" = "lightblue1",
+    "Admin2" = "lightblue3",
+    "Admin3" = "lightblue4"
+  )
+
+  ggplot() +
+    geom_sf(
+      data = africa,
+      fill = "gray95",
+      color = "gray80",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = endemic_sf %>% dplyr::filter(scale_group == "Admin0"),
+      aes(fill = scale_group),
+      color = "white",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = endemic_sf %>% dplyr::filter(scale_group == "Admin1"),
+      aes(fill = scale_group),
+      color = "white",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = endemic_sf %>% dplyr::filter(scale_group == "Admin2"),
+      aes(fill = scale_group),
+      color = "white",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = endemic_sf %>% dplyr::filter(scale_group == "Admin3"),
+      aes(fill = scale_group),
+      color = "white",
+      linewidth = 0.2,
+      alpha = 0.9
+    ) +
+    scale_fill_manual(values = scale_colors, name = "Spatial Scale") +
+    theme_minimal() +
+    labs(
+      title = "Alert locations, endemic"
+    ) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      legend.position = "bottom",
+      axis.title = element_blank()
+    ) +
+    coord_sf(
+      xlim = c(-20, 55),
+      ylim = c(-35, 38),
+      expand = FALSE
+    )
+
+} else {
+
+  alert_locations <- alerts_cl %>%
+    filter(alert_id %in% evalC_cl$alert_id) %>%
+    select(location, spatial_scale) %>%
+    distinct(location, .keep_all = TRUE)
+
+  alerts_sf <- alert_locations %>%
+    left_join(shape_join, by = "location") %>%
+    distinct(location, .keep_all = TRUE) %>%
+    sf::st_as_sf() %>%
+    sf::st_make_valid()
+
+  alerts_sf <- alerts_sf %>%
+    mutate(
+      scale_group = case_when(
+        spatial_scale %in% c("admin1", "admin1 composite") ~ "Admin1",
+        spatial_scale %in% c("admin2", "admin2 composite") ~ "Admin2",
+        spatial_scale %in% c("admin3", "admin3 composite") ~ "Admin3",
+        TRUE ~ spatial_scale
+      ),
+      scale_group = factor(
+        scale_group,
+        levels = c("Admin1", "Admin2", "Admin3")
+      )
+    )
+
+  scale_colors <- c(
+    "Admin1" = "lightblue1",
+    "Admin2" = "lightblue3",
+    "Admin3" = "lightblue4"
+  )
+
+  ggplot() +
+    geom_sf(
+      data = africa,
+      fill = "gray95",
+      color = "gray80",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = alerts_sf %>% filter(scale_group == "Admin1"),
+      aes(fill = scale_group),
+      color = "white",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = alerts_sf %>% filter(scale_group == "Admin2"),
+      aes(fill = scale_group),
+      color = "white",
+      linewidth = 0.2
+    ) +
+    geom_sf(
+      data = alerts_sf %>% filter(scale_group == "Admin3"),
+      aes(fill = scale_group),
+      color = "white",
+      linewidth = 0.2,
+      alpha = 0.9
+    ) +
+    scale_fill_manual(
+      values = scale_colors,
+      name = "Spatial Scale"
+    ) +
+    theme_minimal() +
+    labs(
+      title = paste0(
+        "Alert locations, ",
+        which_setting,
+        " ",
+        ocv_status
+      )
+    ) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_text(size = 11, face = "bold"),
+      legend.text = element_text(size = 10),
+      axis.title = element_blank()
+    ) +
+    coord_sf(
+      xlim = c(-20, 55),
+      ylim = c(-35, 38),
+      expand = FALSE
+    )
+
+}
+
+
+```
+
+
+```{r}
+#| label: prepare-linked-data
+#| echo: true
+
+## subset to outbreaks exceeding a threshold
+print(paste(impact_thresh, "suspected cases is the outbreak filtering threshold"))
+
+if(use_filtered_linked){
+
+  linked_cl <- OutbreakExtractR::add_pop3_adm_columns_outbreak(linked, pre_extract) %>% ## N.B. function changes the outbreak_UID separators to underscores
+    OutbreakExtractR::add_country_column() %>%
+    OutbreakExtractR::add_alert_columns_outbreak(alerts) %>%
+    OutbreakExtractR::filter_ms_data(which_setting = which_setting)
+
+  ## checks
+  print("Number of outbreak_UIDs missing at least one of 24 alert definitions (linked)")
+  linked %>% group_by(outbreak_UID) %>% count() %>% filter(n<24) %>% nrow
+  print("Number of outbreak_UIDs missing at least one of 24 alert definitions")
+  linked_cl %>% group_by(outbreak_UID) %>% count() %>% filter(n<24) %>% nrow
+
+} else{
+  message("Unfiltered links to outbreak data were used. Filtering to one alert definition per outbreak via automated selection.")
+
+  linked_cl_tmp <- OutbreakExtractR::add_pop3_adm_columns_outbreak(linked, pre_extract) %>%
+    OutbreakExtractR::add_country_column() %>%
+    OutbreakExtractR::add_alert_columns_outbreak(alerts) %>%
+    OutbreakExtractR::filter_ms_data(which_setting = which_setting)
+
+  linked_cl_1row <- dplyr::group_by(linked_cl_tmp, outbreak_UID, alert_number) %>%
+    dplyr::count() %>%
+    dplyr::filter(n <= 1) %>%
+    dplyr::ungroup()
+  linked_cl_mrow <- dplyr::group_by(linked_cl_tmp, outbreak_UID, alert_number) %>%
+    dplyr::count() %>%
+    dplyr::filter(n > 1) %>%
+    dplyr::ungroup()
+
+  ## clean outbreak-alert linkages with multiple linkage options
+  clean_mrow_linkages <- function(linked_mrow_dat, linked_full_dat, i){
+    id <- linked_mrow_dat[i,]$outbreak_UID
+    alert_num <- linked_mrow_dat[i,]$alert_number
+
+    tmp <- dplyr::filter(linked_full_dat, outbreak_UID == id & alert_number == alert_num)
+
+    if ("overlap" %in% tmp$linkage){
+      tmp2 <- dplyr::mutate(tmp, keep = dplyr::if_else(linkage == "overlap", TRUE, FALSE))
+    } else if ("closest before" %in% tmp$linkage){
+      tmp2 <- dplyr::mutate(tmp, keep = dplyr::if_else(linkage == "closest before", TRUE, FALSE))
+    }
+
+    rc <- dplyr::filter(tmp2, keep) %>% dplyr::select(-keep)
+    if(nrow(rc) != 1){
+      stop("More than 1 row was returned")
+    }
+    return(rc)
+  }
+
+  linked_mrow_singles <- 1:nrow(linked_cl_mrow) |>
+    purrr::map(\(x) clean_mrow_linkages(linked_cl_mrow, linked_cl_tmp, i = x)) %>%
+    purrr::list_rbind() %>%
+    dplyr::ungroup()
+
+  linked_1rows <- dplyr::left_join(dplyr::select(linked_cl_1row, outbreak_UID, alert_number), linked_cl_tmp, by = c("outbreak_UID", "alert_number"))
+
+  ## checks
+  print("Number of outbreak UIDs in pre and post cleaning are the same")
+  nrow(linked_mrow_singles) + nrow(linked_1rows) == nrow(dplyr::distinct(linked_cl_tmp, outbreak_UID, alert_number))
+
+  linked_cl <- dplyr::bind_rows(linked_1rows, linked_mrow_singles) ## one linkage per alert def - outbreak
+}
+
+linked_cl_large <- dplyr::filter(linked_cl, total_sCh > impact_thresh) ## only keep outbreaks above impact threshold
+
+```
+
+Identify proportion of target population as \>1 year olds by country according to UNWPP2024 in the alert year.
+
+```{r}
+#| label: prep_target_pop
+#| echo: false
+
+library(wpp2024)
+library(countrycode)
+data(popAge1dt)
+
+iso3_uq <- sort(unique(evalC_cl$country))
+codes <- dplyr::select(countrycode::codelist, iso3c, un.name.en) %>%
+  dplyr::filter(iso3c %in% iso3_uq) %>%
+  dplyr::mutate(un.name.en = dplyr::case_when(iso3c == "CIV" ~ "Cote d'Ivoire",
+                              .default = un.name.en))
+
+iso3_targetpop <- popAge1dt %>%
+  dplyr::mutate(target_pop = dplyr::if_else(age != 0, pop, 0)) %>%
+  dplyr::group_by(name, year) %>%
+  dplyr::summarise(target_pop = sum(target_pop), total_pop = sum(pop)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(prop_targeted = round(target_pop/total_pop, 2)) %>%
+  dplyr::right_join(codes, by = c("name" = "un.name.en")) %>%
+  dplyr::relocate(iso3c, .after = "name") %>%
+  dplyr::rename(country = iso3c)
+
+targetpop_cl <- dplyr::select(iso3_targetpop, country, year, prop_targeted)
+
+merge_prop_targeted <- dplyr::distinct(ags_cl, alert_id, TL_first_alert, country) %>%
+  dplyr::mutate(TL_year = lubridate::year(TL_first_alert)) %>%
+  dplyr::left_join(targetpop_cl, by = c("country", "TL_year" = "year")) %>%
+  dplyr::select(alert_id, prop_targeted)
+
+```
+
+# Alert utility
+
+1.  Alerts preceding highest potential impact
+2.  Alerts preceding highest potential efficiency
+3.  Alerts with high PPV (outcomes with \>`r impact_thresh` cases)
+4.  Proportion of outbreaks with \>`r impact_thresh` cases that were missed
+5.  Delay from outbreak start for outbreaks \>`r impact_thresh` cases
+
+```{r}
+#| label: utility_functions
+#| echo: false
+
+quibble2 <- function(colname, q = c(0.025, 0.25, 0.5, 0.75, 0.975)) {
+  tibble("{{ colname }}_q" := paste0("q", stringr::str_remove(as.character(q), "0.")), "{{ colname }}" := quantile(colname, q, na.rm = TRUE))
+}
+
+prepare_fig_dat <- function(df){
+  OutbreakExtractR::label_alerts_short(df, is_ordered = TRUE) %>%
+  dplyr::mutate(alert_lab = forcats::fct_rev(alert_lab)) %>%
+  OutbreakExtractR::label_alerttypes()
+}
+
+```
+
+## Data basics
+
+Number of alerts per alert definition, number of outbreaks linked to each alert definition
+
+```{r}
+#| label: tab-data-basics
+#| echo: false
+
+nalerts <- dplyr::group_by(ags_cl, pop_brk, alert_type, alert_number) %>%
+  dplyr::count() %>%
+  dplyr::rename(n_alerts = n)
+
+noutbreaks <- dplyr::filter(linked_cl_large, is_triggered) %>% 
+  dplyr::group_by(pop_brk, alert_type, alert_number) %>%
+  dplyr::count() %>%
+  dplyr::rename(n_outbreaks = n)
+
+df_basics <- dplyr::full_join(nalerts, noutbreaks, by = c("pop_brk", "alert_type", "alert_number")) %>%
+  prepare_fig_dat() %>%
+  dplyr::select(alert_type, pop_brk, alert_lab, n_alerts, n_outbreaks)
+
+reactable_template(df_basics,
+                  col_names = list(alert_type = reactable::colDef(name = "Alert Type"),
+                                  pop_brk = reactable::colDef(name = "Pop Group"),
+                                  alert_lab = reactable::colDef(name = "Alert Def"),
+                                  n_alerts = reactable::colDef(name = "N Alerts"), 
+                                  n_outbreaks = reactable::colDef(name = "N Outbreaks")))
+
+```
+
+## Dimensions of alert utility
+
+```{r}
+#| label: prep_underlying_data
+#| echo: false
+
+### impact and efficiency ###
+prep_impact_eff_dat <- dplyr::left_join(evalC_cl, merge_prop_targeted, by = c("alert_id")) %>%
+  dplyr::rename(impact = total_sCh) %>%
+  dplyr::mutate(eff = impact / (prop_targeted*pop) * 1000)
+
+if(use_iqr){
+  means_impact_eff_dat <- prep_impact_eff_dat %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(impact_mean = median(impact), eff_mean = median(eff)) %>%
+  dplyr::ungroup()
+} else {
+  means_impact_eff_dat <- prep_impact_eff_dat %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(impact_mean = mean(impact), eff_mean = mean(eff)) %>%
+  dplyr::ungroup()
+}
+
+### ppv ###
+prep_ppv_dat <- dplyr::mutate(evalC_cl, true_positives := dplyr::if_else(total_sCh > impact_thresh, TRUE, FALSE))
+
+### missed outbreaks and delayed detection ###
+prep_missed_delay_dat <- linked_cl_large %>%
+  dplyr::mutate(delay = as.numeric(alert_group_start-outbreak_start, units = "weeks"))
+
+if (use_iqr){
+ means_delay_dat <- prep_missed_delay_dat %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(delay_mean = median(delay, na.rm = TRUE)) %>%
+  dplyr::ungroup()   
+} else {
+ means_delay_dat <- prep_missed_delay_dat %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(delay_mean = mean(delay, na.rm = TRUE)) %>%
+  dplyr::ungroup() 
+}
+
+n_outbreaks <- linked_cl_large %>%
+  dplyr::distinct(outbreak_UID, pop_brk) %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::summarise(n_outbreaks = n())
+
+sum(n_outbreaks$n_outbreaks) == length(unique(linked_cl_large$outbreak_UID)) ## total number of outbreaks
+
+```
+
+```{r}
+#| label: prep_fig_data
+#| echo: false
+
+fig_impact_dat <- dplyr::group_by(prep_impact_eff_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(impact)) %>%
+  tidyr::pivot_wider(names_from = impact_q, names_glue = "{.value}_{impact_q}", values_from = impact) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_dat, alert_number, alert_type, pop_brk, impact_mean), by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_eff_dat <- dplyr::group_by(prep_impact_eff_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(eff)) %>%
+  tidyr::pivot_wider(names_from = eff_q, names_glue = "{.value}_{eff_q}", values_from = eff) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_dat, alert_number, alert_type, pop_brk, eff_mean), by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_ppv_dat <- dplyr::group_by(prep_ppv_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(alerts = n(), true_positives = sum(true_positives), ppv = round(true_positives/alerts, 2)) %>%
+  prepare_fig_dat()
+
+fig_missed_dat <- dplyr::group_by(prep_missed_delay_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(n_detected = sum(is_triggered)) %>%
+  dplyr::left_join(n_outbreaks, by = c("pop_brk")) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(n_missed = n_outbreaks - n_detected,
+                missed_prop = n_missed/n_outbreaks) %>%
+  prepare_fig_dat()
+
+fig_delay_dat <- dplyr::group_by(prep_missed_delay_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(delay)) %>%
+  dplyr::ungroup() %>%
+  tidyr::pivot_wider(names_from = delay_q, names_glue = "{.value}_{delay_q}", values_from = delay) %>%
+  dplyr::full_join(means_delay_dat, by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_complete_dat <- dplyr::full_join(fig_impact_dat, fig_eff_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_ppv_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_missed_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_delay_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab"))
+
+## 30 Oct save as file to compare epidemic/endemic locations and test for statistically significant differences
+add_setting_and_save <- function(df, name) {
+  df$which_setting <- which_setting
+  saveRDS(df, paste0(pre_path, name, which_setting, ".rds"))
+}
+
+add_setting_and_save(fig_complete_dat, "compare_significant_missed_ppv_chisquare_")
+
+fig_under_50k <- dplyr::filter(fig_complete_dat, pop_brk == "< 50k")
+fig_50k_500k <- dplyr::filter(fig_complete_dat, pop_brk == "[50k, 500k)")
+fig_over_500k <- dplyr::filter(fig_complete_dat, pop_brk == "\U2265 500k")
+
+```
+
+```{r}
+#| label: func-figs
+#| echo: false
+
+impact_lineplot <- function(df, title_lab = "Impact", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, impact_total_mean = mean(impact_mean, na.rm = TRUE))
+  print(paste("Impact mean:", df_mean$impact_total_mean))
+
+  ggplot2::ggplot(df, aes(y = alert_lab)) +
+    geom_point(aes(x = impact_mean, colour = alert_type)) +
+    geom_point(aes(x = impact_q5, colour = alert_type), shape = "x", size = 4) +
+    geom_linerange(aes(xmin = impact_q25, xmax = impact_q75, colour = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = impact_total_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_colour_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Suspected Cases", labels = scales::label_number(scale = 0.001, suffix = "k")) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+
+eff_lineplot <- function(df, title_lab = "Efficiency", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, eff_total_mean = mean(eff_mean, na.rm = TRUE))
+  print(paste("Efficiency mean:", df_mean$eff_total_mean))
+
+  ggplot2::ggplot(df, aes(y = alert_lab)) +
+    geom_point(aes(x = eff_mean, colour = alert_type)) +
+    geom_point(aes(x = eff_q5, colour = alert_type), shape = "x", size = 4) +
+    geom_linerange(aes(xmin = eff_q25, xmax = eff_q75, colour = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = eff_total_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_colour_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Cases/1k target pop", labels = scales::label_number(big.mark = "", accuracy = 1), limits = c(0, max(df$eff_mean, na.rm = TRUE)*1.1)) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+
+ppv_barplot <- function(df, title_lab = "PPV", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, ppv_mean = mean(ppv, na.rm = TRUE))
+  print(paste("PPV mean:", df_mean$ppv_mean))
+
+  ggplot2::ggplot(df, aes(x = ppv, y = alert_lab)) +
+    geom_col(aes(fill = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = ppv_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_x_continuous("PPV", labels = scales::label_number(accuracy = 0.1), breaks = seq(0, 1, by = 0.2), limits = c(0, 1)) +
+    scale_y_discrete("Alert Type") +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank(), plot.margin = unit(c(1,1,1,3), "mm")) +
+    ggtitle(title_lab)
+}
+
+missed_barplot <- function(df, title_lab = "Missed", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, missed_mean = mean(missed_prop, na.rm = TRUE))
+  print(paste("Missed mean:", df_mean$missed_mean))
+
+  ggplot2::ggplot(df, aes(x = missed_prop, y = alert_lab)) +
+    geom_col(aes(fill = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = missed_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Prop of outbreaks", labels = scales::label_number(accuracy = 0.1), breaks = seq(0, 1, by = 0.2), limits = c(0, 1)) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+
+delay_lineplot <- function(df, title_lab = "Delay", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, delay_total_mean = mean(delay_mean, na.rm = TRUE))
+  print(paste("Delay mean:", df_mean$delay_total_mean))
+
+  ggplot2::ggplot(df, aes(y = alert_lab)) +
+    geom_point(aes(x = delay_mean, colour = alert_type)) +
+    geom_point(aes(x = delay_q5, colour = alert_type), shape = "x", size = 4) +
+    geom_vline(data = df_mean, aes(xintercept = delay_total_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    geom_linerange(aes(xmin = delay_q25, xmax = delay_q75, colour = alert_type)) +
+    scale_colour_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Weeks of delay", labels = scales::label_number()) +
+    theme_bw() +
+    theme(legend.position = "right", axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+```
+
+
+
+```{r}
+#| label: boxplots-and-barcharts-mainpop
+#| echo: true
+#| fig.width: 10
+
+col_pal <- "Dark2"
+
+fig_impact_raw <- prep_impact_eff_dat %>% prepare_fig_dat()
+fig_eff_raw    <- prep_impact_eff_dat %>% prepare_fig_dat()
+fig_delay_raw  <- prep_missed_delay_dat %>% prepare_fig_dat()
+
+## 30 Oct save as file to compare epidemic/endemic locations and test for statistically significant differences
+add_setting_and_save(fig_impact_raw, "compare_significant_impact_testmeans_")
+add_setting_and_save(fig_eff_raw, "compare_significant_efficiency_testmeans_")
+add_setting_and_save(fig_delay_raw, "compare_significant_delay_testmeans_")
+
+pop_groups <- c("< 50k", "[50k, 500k)", "\U2265 500k")
+
+impact_data_list <- lapply(pop_groups, function(pg) fig_impact_raw %>% filter(pop_brk == pg))
+names(impact_data_list) <- pop_groups
+
+eff_data_list <- lapply(pop_groups, function(pg) fig_eff_raw %>% filter(pop_brk == pg))
+names(eff_data_list) <- pop_groups
+
+delay_data_list <- lapply(pop_groups, function(pg) fig_delay_raw %>% filter(pop_brk == pg))
+names(delay_data_list) <- pop_groups
+
+## function to add vertical dashed line for overall mean
+add_mean_line <- function(df, xvar) {
+  overall_mean <- mean(df[[xvar]], na.rm = TRUE)
+  ymin <- 0.5
+  ymax <- length(unique(df$alert_lab)) + 0.5
+  geom_segment(aes(x = overall_mean, xend = overall_mean, y = ymin, yend = ymax),
+               linetype = 2, color = "black", alpha = 0.7, inherit.aes = FALSE)
+}
+
+center_x_on_mean <- function(df, xvar) {
+  x_mean <- mean(df[[xvar]], na.rm = TRUE)
+  x_lower <- quantile(df[[xvar]], 0.05, na.rm = TRUE)
+  x_upper <- quantile(df[[xvar]], 0.95, na.rm = TRUE)
+  xlim_min <- min(x_lower, x_mean - 0.2 * (x_upper - x_lower))
+  xlim_max <- max(x_upper, x_mean + 0.2 * (x_upper - x_lower))
+  
+  c(xlim_min, xlim_max)
+}
+
+center_x_on_box <- function(df, xvar, groupvar) {
+  lims <- df %>%
+    group_by(.data[[groupvar]]) %>%
+    summarise(
+      q1 = quantile(.data[[xvar]], 0.25, na.rm = TRUE),
+      q3 = quantile(.data[[xvar]], 0.75, na.rm = TRUE),
+      iqr = q3 - q1,
+      lower = q1 - 1.5 * iqr,
+      upper = q3 + 1.5 * iqr
+    )
+  
+  c(min(lims$lower), max(lims$upper))
+}
+
+## impact boxplot
+create_impact_boxplot <- function(df, pop_label) {
+  xlim_vals <- center_x_on_mean(df, "impact")
+  ggplot(df, aes(x = impact, y = alert_lab, fill = alert_type)) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, "impact") +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Suspected Cases", labels = label_number(scale = 0.001, suffix = "k")) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      axis.text.y = element_text(size = 9, color = "black"),
+      axis.ticks.y = element_line(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle("Impact")
+}
+
+## efficiency boxplot
+create_eff_boxplot <- function(df, xvar, metric_label, pop_label) {
+  xlim_vals <- center_x_on_mean(df, xvar)
+  ggplot(df, aes_string(x = xvar, y = "alert_lab", fill = "alert_type")) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, xvar) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Cases/1k target pop", labels = label_number(big.mark = "", accuracy = 1)) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle(metric_label)
+}
+
+## delay boxplot (legend visible)
+create_delay_boxplot <- function(df, xvar, metric_label, pop_label) {
+  xlim_vals <- center_x_on_mean(df, xvar)
+  ggplot(df, aes_string(x = xvar, y = "alert_lab", fill = "alert_type")) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, xvar) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Weeks of delay", labels = label_number(big.mark = "", accuracy = 1)) +
+    coord_cartesian(xlim = c(xlim_vals[1], 12)) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle(metric_label)
+}
+
+## boxplots per population group
+impact_boxplots <- lapply(impact_data_list, create_impact_boxplot)
+eff_boxplots    <- lapply(eff_data_list, function(df) create_eff_boxplot(df, "eff", "Efficiency", NULL))
+delay_boxplots  <- lapply(delay_data_list, function(df) create_delay_boxplot(df, "delay", "Timeliness", NULL))
+
+## Mar 2026 saving as png
+ws <- c(4, 4, 2, 2, 4)
+
+p <- gridExtra::arrangeGrob(
+  impact_boxplots[["[50k, 500k)"]],
+  eff_boxplots[["[50k, 500k)"]],
+  ppv_barplot(fig_50k_500k),
+  missed_barplot(fig_50k_500k),
+  delay_boxplots[["[50k, 500k)"]],
+  nrow = 1, widths = ws, padding = unit(0.6, "line")
+)
+
+## save
+ggplot2::ggsave(paste0(fig_path,"/fig2_boxplot","_",ocv_status ,".png"), p, width = 10, height = 5, dpi = 300)
+## print to report
+grid::grid.newpage()
+grid::grid.draw(p)
+
+## helper: summarise existing columns safely
+summarise_metrics <- function(df, metrics, source) {
+  present <- intersect(metrics, names(df))
+  if(length(present) == 0) return(NULL)
+  
+  df %>%
+    select(pop_brk, alert_type, any_of(present)) %>%
+    pivot_longer(cols = any_of(present), names_to = "metric", values_to = "value") %>%
+    group_by(pop_brk, metric) %>%
+    summarise(mean = mean(value, na.rm = TRUE),
+              sd   = sd(value, na.rm = TRUE),
+              source = source,
+              .groups = "drop")
+}
+
+summary_impact <- summarise_metrics(fig_impact_raw, metrics = c("impact_mean", "impact"), source = "fig_impact_raw")
+summary_eff <- summarise_metrics(fig_eff_raw, metrics = c("eff_mean", "eff"), source = "fig_eff_raw")
+summary_delay <- summarise_metrics(fig_delay_raw, metrics = c("delay_mean", "delay"), source = "fig_delay_raw")
+summary_ppv_missed <- summarise_metrics(fig_50k_500k, metrics = c("ppv", "missed_prop"), source = "fig_50k_500k")
+
+metric_summary <- bind_rows(summary_impact, summary_eff, summary_delay, summary_ppv_missed)
+
+print(metric_summary)
+
+metric_summary_fmt <- metric_summary %>%
+  mutate(mean_sd = sprintf("%.2f (%.2f)", mean, sd)) %>%
+  select(pop_brk, metric, mean_sd, source)
+
+print(metric_summary_fmt)
+
+```
+
+### Dimension distributions, 50-500k
+
+```{r}
+#| label: figs-50k-500k
+#| fig-cap: Utility score dimensions for 50k-500k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+ws <- c(1, .7, .7, .7, 1.25)
+
+gridExtra::grid.arrange(impact_lineplot(fig_50k_500k), eff_lineplot(fig_50k_500k), ppv_barplot(fig_50k_500k), missed_barplot(fig_50k_500k), delay_lineplot(fig_50k_500k), nrow=1, widths = ws, padding = unit(0.6, "line"))
+
+```
+
+### Supplement
+
+#### Dimension distributions, \<50k
+
+```{r}
+#| label: figs-under-50k
+#| fig-cap: Utility score dimensions for under 50k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+gridExtra::grid.arrange(impact_lineplot(fig_under_50k), eff_lineplot(fig_under_50k), ppv_barplot(fig_under_50k), missed_barplot(fig_under_50k), delay_lineplot(fig_under_50k), nrow=1, widths = ws, padding = unit(0.6, "line"))
+
+```
+
+#### Dimension distributions \>500k
+
+```{r}
+#| label: figs-over-500k
+#| fig-cap: Utility score dimensions for over 500k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+gridExtra::grid.arrange(impact_lineplot(fig_over_500k), eff_lineplot(fig_over_500k), ppv_barplot(fig_over_500k), missed_barplot(fig_over_500k), delay_lineplot(fig_over_500k), nrow=1, widths = ws, padding = unit(0.6, "line"))
+
+```
+
+## Dimension comparison: endemic vs epidemic by pop group & alert definition
+
+```{r}
+#| results: asis
+
+## Combined Endemic vs Epidemic comparisons (Wilcoxon and Chi-square/Fisher)
+
+all_results <- list()  ## store all metrics together
+settings <- c("endemic", "epidemic")
+show_only_main <- TRUE
+wilcox_metrics <- c("delay", "efficiency", "impact")
+metric_cols <- list(
+  delay = "delay",
+  efficiency = "eff",
+  impact = "impact"
+)
+
+for (metric in wilcox_metrics) {
+  files <- setNames(
+    paste0(pre_path, "compare_significant_", metric, "_testmeans_", settings, ".rds"),
+    settings
+  )
+  if (!all(file.exists(files))) next
+
+  df <- do.call(rbind, lapply(names(files), function(s) {
+    d <- readRDS(files[[s]])
+    d$which_setting <- s
+    d
+  }))
+  df$which_setting <- factor(df$which_setting, levels = settings)
+  value_col <- metric_cols[[metric]]
+
+  ## plot histograms to explore distribution of wilcoxon metrics
+  p <- ggplot(df, aes(x = .data[[value_col]], fill = which_setting)) +
+    geom_histogram(alpha = 0.7, bins = 30) +
+    facet_wrap(~which_setting, ncol = 1, scales = "free_y") +
+    scale_fill_manual(values = c("endemic" = "#1f78b4", "epidemic" = "#e31a1c")) +
+    labs(title = paste("Distribution of", metric, "(Endemic vs Epidemic)"),
+         x = metric, y = "Count") +
+    theme_minimal(base_size = 13) +
+    theme(plot.title = element_text(face = "bold", hjust = 0.5),
+          axis.title.x = element_text(face = "bold"),
+          axis.title.y = element_text(face = "bold"),
+          legend.position = "none")
+  print(p)
+
+  ## Wilcoxon test
+  wilcox_results <- df %>%
+    group_by(pop_brk, alert_lab) %>%
+    group_modify(~{
+      x <- .x[!is.na(.x[[value_col]]), ]
+      if (length(unique(x$which_setting)) == 2) {
+        fm <- reformulate("which_setting", response = value_col)
+        t <- suppressWarnings(wilcox.test(fm, data = x, exact = FALSE))
+        tidy(t)
+      } else tibble(statistic = NA_real_, p.value = NA_real_)
+    }) %>%
+    ungroup() %>%
+    mutate(test = "Wilcoxon rank-sum", method = "Wilcoxon")
+
+  ## medians
+  medians <- df %>%
+    group_by(pop_brk, alert_lab, which_setting) %>%
+    summarize(median_value = median(.data[[value_col]], na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = which_setting, values_from = median_value)
+
+  ## combine
+  final_table <- wilcox_results %>%
+    left_join(medians, by = c("pop_brk", "alert_lab")) %>%
+    rename(endemic = endemic, epidemic = epidemic) %>%
+    mutate(metric = metric) %>%
+    select(metric, pop_brk, alert_lab, test, method, endemic, epidemic, statistic, p.value)
+
+  ## filter main
+  if (show_only_main) {
+    final_table <- final_table %>%
+      mutate(alert_lab_clean = str_replace_all(alert_lab, "\u2265", ">=")) %>%
+      filter(pop_brk == "[50k, 500k)", alert_lab_clean == ">= 50 weekly") %>%
+      select(-alert_lab_clean)
+  }
+
+  all_results[[metric]] <- final_table
+}
+
+## Chi-square / Fisher metrics
+chisq_metrics <- c("missed", "ppv")
+metric_file <- "compare_significant_missed_ppv_chisquare_"
+
+for (metric in chisq_metrics) {
+  files <- setNames(
+    paste0(pre_path, metric_file, settings, ".rds"),
+    settings
+  )
+  if (!all(file.exists(files))) next
+
+  df <- do.call(rbind, lapply(names(files), function(s) {
+    d <- readRDS(files[[s]])
+    d$which_setting <- s
+    d
+  }))
+  df$which_setting <- factor(df$which_setting, levels = settings)
+
+  test_results <- df %>%
+    group_by(pop_brk, alert_lab) %>%
+    group_modify(~{
+      TP_pair     <- tapply(.x$true_positives, .x$which_setting, sum)
+      Alerts_pair <- tapply(.x$alerts, .x$which_setting, sum)
+      FN_pair     <- tapply(.x$n_missed, .x$which_setting, sum)
+      Nout_pair   <- tapply(.x$n_outbreaks, .x$which_setting, sum)
+
+      TP_pair[is.na(TP_pair)]         <- 0
+      Alerts_pair[is.na(Alerts_pair)] <- 0
+      FN_pair[is.na(FN_pair)]         <- 0
+      Nout_pair[is.na(Nout_pair)]     <- 0
+
+      if (metric == "ppv") {
+        prop_end <- ifelse(Alerts_pair["endemic"] > 0,
+                           TP_pair["endemic"] / Alerts_pair["endemic"], NA)
+        prop_epi <- ifelse(Alerts_pair["epidemic"] > 0,
+                           TP_pair["epidemic"] / Alerts_pair["epidemic"], NA)
+        mat <- matrix(c(TP_pair["endemic"], Alerts_pair["endemic"] - TP_pair["endemic"],
+                        TP_pair["epidemic"], Alerts_pair["epidemic"] - TP_pair["epidemic"]),
+                      nrow = 2, byrow = TRUE)
+      } else {
+        prop_end <- ifelse(Nout_pair["endemic"] > 0,
+                           FN_pair["endemic"] / Nout_pair["endemic"], NA)
+        prop_epi <- ifelse(Nout_pair["epidemic"] > 0,
+                           FN_pair["epidemic"] / Nout_pair["epidemic"], NA)
+        mat <- matrix(c(FN_pair["endemic"], Nout_pair["endemic"] - FN_pair["endemic"],
+                        FN_pair["epidemic"], Nout_pair["epidemic"] - FN_pair["epidemic"]),
+                      nrow = 2, byrow = TRUE)
+      }
+
+      mat[!is.finite(mat)] <- 0
+      mat[mat < 0] <- 0
+      if (all(mat == 0)) return(tibble(method = NA_character_, statistic = NA_real_, 
+                                        p.value = NA_real_, endemic = prop_end, epidemic = prop_epi))
+
+      ## use expected counts to decide between Chi-square and Fisher
+      expected <- tryCatch(chisq.test(mat, correct = FALSE)$expected, error = function(e) NULL)
+      if (is.null(expected) || any(expected < 5)) {
+        tt <- fisher.test(mat)
+        method <- "Fisher exact"
+        stat <- NA_real_
+      } else {
+        tt <- chisq.test(mat, correct = FALSE)
+        method <- "Chi-square"
+        stat <- tt$statistic
+      }
+
+      tibble(method = method, statistic = stat, p.value = tt$p.value,
+             endemic = prop_end, epidemic = prop_epi)
+    }) %>%
+    ungroup() %>%
+    mutate(test = "Chi-square/Fisher", metric = metric)
+
+  ## Filter main
+  if (show_only_main) {
+    test_results <- test_results %>%
+      mutate(alert_lab_clean = str_replace_all(alert_lab, "\u2265", ">=")) %>%
+      filter(pop_brk == "[50k, 500k)", alert_lab_clean == ">= 50 weekly") %>%
+      select(-alert_lab_clean)
+  }
+
+  all_results[[metric]] <- test_results
+}
+
+combined_table <- bind_rows(all_results) %>%
+  mutate(
+    `significance level` = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE ~ "ns"
+    ),
+    p.value = ifelse(
+      !is.na(p.value) & p.value < 0.001,
+      cell_spec(round(p.value, 3), color = "white", background = "#2b8c4d"),
+      cell_spec(round(p.value, 3), color = "white", background = "#b30000")
+    )
+  ) %>%
+  rename(`population group` = pop_brk, `alert definition` = alert_lab) %>%
+  select(metric, `population group`, `alert definition`, test, method, endemic, epidemic, statistic, p.value, `significance level`)
+
+## printing
+kable(
+  combined_table,
+  format = "html",
+  escape = FALSE,
+  caption = "Wilcoxon and Chi-square/Fisher results (Endemic vs Epidemic)"
+) %>%
+  kable_styling(full_width = FALSE, position = "center") %>%
+  row_spec(0, bold = TRUE, background = "#f8f8f8") %>%
+  print()
+
+
+```
+
+## Trade-offs in utility dimensions
+
+```{r}
+#| label: prep_util_data
+#| echo: false
+
+def_impact_dat <- fig_impact_dat %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::mutate(std_impact = as.vector(scale(impact_mean, center = TRUE, scale = TRUE))) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(pop_brk, desc(std_impact)) %>%
+  dplyr::select(alert_number, alert_type, pop_brk, alert_lab, impact_mean, std_impact)
+
+def_eff_dat <- fig_eff_dat %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::mutate(std_eff = as.vector(scale(eff_mean, center = TRUE, scale = TRUE))) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(pop_brk, desc(std_eff)) %>%
+  dplyr::select(alert_number, pop_brk, eff_mean, std_eff)
+
+def_ppv_dat <- fig_ppv_dat %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::mutate(std_ppv = as.vector(scale(ppv, center = TRUE, scale = TRUE))) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(pop_brk, desc(std_ppv)) %>%
+  dplyr::select(alert_number, pop_brk, ppv, std_ppv, alerts, true_positives)
+
+## multiply by -1 so that the scale is reversed (so higher standardized value represents higher utility (lower proportion of missed outbreaks and smaller delay mean higher utility))
+def_missed_dat <- fig_missed_dat %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::mutate(std_missed = as.vector(scale(missed_prop, center = TRUE, scale = TRUE)) *-1) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(pop_brk, desc(std_missed)) %>%
+  dplyr::select(alert_number, pop_brk, missed_prop, std_missed)
+
+## multiply by -1 so that the scale is reversed (so higher standardized value represents higher utility (lower proportion of missed outbreaks and smaller delay mean higher utility))
+def_delay_dat <- fig_delay_dat %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::mutate(std_delay = as.vector(scale(delay_mean, center = TRUE, scale = TRUE)) *-1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(alert_number, pop_brk, delay_mean, std_delay) %>%
+  dplyr::arrange(pop_brk, desc(std_delay))
+```
+
+```{r}
+#| label: prep_total_util_data
+#| echo: false
+
+def_complete_dat <- dplyr::full_join(def_impact_dat, def_eff_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_ppv_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_missed_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_delay_dat, by = c("alert_number", "pop_brk")) %>%
+  OutbreakExtractR::add_alert_stringency() %>%
+  dplyr::select(pop_brk, alert_lab, alert_number, alert_type, alert_stringency,
+                impact_mean, eff_mean, ppv, missed_prop, delay_mean,
+                std_impact, std_eff, std_ppv, std_missed, std_delay
+  ) %>%
+  dplyr::mutate(across(impact_mean:delay_mean, ~round(.x, 1)), across(contains("std_"), ~round(.x, 1))) %>%
+  dplyr::mutate(util_score = rowSums(dplyr::across(contains("std_")))) %>%
+  dplyr::arrange(desc(util_score)) 
+  
+## adding standard deviations/iqr and number of alerts/outbreaks denominators per metric
+
+sd_impact_dat <- prep_impact_eff_dat %>%
+  dplyr::group_by(alert_number, pop_brk) %>%
+  dplyr::summarise(
+    sd_impact = ifelse(sum(!is.na(impact)) > 1, sd(impact, na.rm = TRUE), 0)
+  ) %>%
+  dplyr::ungroup()
+
+iqr_impact_dat <- prep_impact_eff_dat %>%
+  dplyr::group_by(alert_number, pop_brk) %>%
+  dplyr::summarise(
+    iqr_impact = IQR(impact, na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup()
+
+sd_eff_dat <- prep_impact_eff_dat %>%
+  dplyr::group_by(alert_number, pop_brk) %>%
+  dplyr::summarise(
+    sd_eff = ifelse(sum(!is.na(eff)) > 1, sd(eff, na.rm = TRUE), 0)
+  ) %>%
+  dplyr::ungroup()
+
+iqr_eff_dat <- prep_impact_eff_dat %>%
+  dplyr::group_by(alert_number, pop_brk) %>%
+  dplyr::summarise(
+    iqr_eff = IQR(eff, na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup()
+
+sd_delay_dat <- prep_missed_delay_dat %>%
+  dplyr::group_by(alert_number, pop_brk) %>%
+  dplyr::summarise(
+    sd_delay = ifelse(sum(!is.na(delay)) > 1, sd(delay, na.rm = TRUE), 0)
+  ) %>%
+  dplyr::ungroup()
+
+iqr_delay_dat <- prep_missed_delay_dat %>%
+  dplyr::group_by(alert_number, pop_brk) %>%
+  dplyr::summarise(
+    iqr_delay = IQR(delay, na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup()
+
+## denominators
+ppv_den_dat <- prep_ppv_dat %>%
+  dplyr::group_by(alert_number, pop_brk) %>%
+  dplyr::summarise(n_alerts = n()) %>%
+  dplyr::ungroup()
+
+missed_den_dat <- linked_cl_large %>%
+  dplyr::distinct(outbreak_UID, pop_brk) %>%  ## one row per outbreak
+  dplyr::group_by(pop_brk) %>%                ## group by population bracket
+  dplyr::summarise(n_outbreaks = n()) %>%
+  dplyr::ungroup()
+
+## merge with main table
+def_complete_dat_added <- def_complete_dat %>%
+  dplyr::left_join(sd_impact_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(sd_eff_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(sd_delay_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(ppv_den_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(missed_den_dat, by = "pop_brk") %>% 
+  dplyr::mutate(across(c(sd_impact, sd_eff, sd_delay), ~round(.x, 1))) %>%
+  dplyr::select(
+    pop_brk, alert_lab, alert_type, alert_stringency,
+    impact_mean, sd_impact, eff_mean, sd_eff, ppv, n_alerts,
+    missed_prop, n_outbreaks, delay_mean, sd_delay,
+    std_impact, std_eff, std_ppv, std_missed, std_delay,
+    util_score
+  )
+
+write.csv(def_complete_dat_added, "complete_utility_data_mean_sd.csv")
+
+## Mar 2026 version of tables with IQR
+def_complete_dat_added_IQR <- def_complete_dat %>%
+  dplyr::left_join(iqr_impact_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(iqr_eff_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(iqr_delay_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(ppv_den_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::left_join(missed_den_dat, by = "pop_brk") %>% 
+  dplyr::mutate(across(c(iqr_impact, iqr_eff, iqr_delay), ~round(.x, 1))) %>%
+  dplyr::select(
+    pop_brk, alert_lab, alert_type, alert_stringency,
+    impact_mean, iqr_impact, eff_mean, iqr_eff, ppv, n_alerts,
+    missed_prop, n_outbreaks, delay_mean, iqr_delay,
+    std_impact, std_eff, std_ppv, std_missed, std_delay,
+    util_score
+  )
+
+
+```
+
+### Stringency by alert type, 50-500k
+
+```{r}
+#| label: fig-stringency-50-500
+#| fig-width: 2.5
+#| fig-height: 3.5
+#| echo: true
+
+f3a <- ggplot2::ggplot(dplyr::filter(def_complete_dat, pop_brk == "[50k, 500k)"),
+                       aes(x = alert_stringency, y = util_score)) +
+  geom_point(aes(colour = alert_type, alpha = alert_stringency)) +
+  geom_hline(yintercept = 0, colour = "black", linetype = 2, alpha = 0.7) +
+  scale_x_discrete("Alert Stringency") +
+  scale_y_continuous("Utility Score \u2192", limits = c(-4, 4)) +
+  scale_colour_brewer("Alert Type", palette = "Dark2") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  guides(alpha = "none")
+
+f3a
+```
+
+### Stringency vs Dimension Score, 50-500k
+
+```{r}
+#| label: fig-stringency-utility-dimension-50-500
+#| fig-width: 5
+#| fig-height: 3.5
+#| echo: true
+
+def_complete_dat_longdim <- dplyr::select(def_complete_dat, pop_brk, alert_lab, alert_type, alert_stringency, dplyr::contains("std_")) %>%
+  tidyr::pivot_longer(contains("std_"), names_to = "dimension", values_to = "score") %>%
+  OutbreakExtractR::label_dimensions() 
+
+f3b <- ggplot2::ggplot(dplyr::filter(def_complete_dat_longdim, pop_brk == "[50k, 500k)"),
+                       aes(x = alert_stringency, y = score)) +
+  geom_point(aes(colour = alert_type, alpha = alert_stringency)) +
+  geom_hline(yintercept = 0, colour = "black", linetype = 2, alpha = 0.7) +
+  scale_x_discrete("Alert Stringency") +
+  scale_y_continuous("Dimension Score \u2192", limits = c(-3, 3)) +
+  scale_colour_brewer("Alert Type", palette = "Dark2") +
+  theme_bw() +
+  guides(alpha = "none") +
+  facet_wrap(~dimension, nrow = 2) +
+  theme(
+    legend.position = c(0.85, 0.25),
+    legend.background = element_rect(fill = "white", colour = "black"),
+    legend.key.size = unit(0.5, "lines")
+  )
+
+f3b
+```
+
+### Tradeoffs fig, 50-500k
+
+Fix 3b so that the legend goes in the facet whitespace
+
+```{r}
+#| label: fig-tradeoffs-50-500
+#| fig-width: 7.5
+#| fig-height: 3.5
+#| echo: true
+
+ws <- c(.8, 1)
+
+f3a_labeled <- gridExtra::arrangeGrob(
+  f3a,
+  top = grid::textGrob("A", x = 0, hjust = 0, gp = grid::gpar(fontsize = 14, fontface = "bold"))
+)
+
+f3b_labeled <- gridExtra::arrangeGrob(
+  f3b,
+  top = grid::textGrob("B", x = 0, hjust = 0, gp = grid::gpar(fontsize = 14, fontface = "bold"))
+)
+
+p2 <- gridExtra::arrangeGrob(
+  f3a_labeled,
+  f3b_labeled,
+  widths = ws,
+  nrow = 1,
+  padding = unit(0.6, "line")
+)
+
+ggplot2::ggsave(
+  paste0(fig_path,"/fig2_tradeoff_scatterplots","_",ocv_status,".png"),
+  p2,
+  width = 7.5,
+  height = 3,
+  dpi = 300
+)
+
+# print in the report
+grid::grid.newpage()
+grid::grid.draw(p2)
+
+```
+
+### Supplement Methods
+
+#### Sensitivity of Utility Score Calculation 
+
+-   Rank sum score (TODO) - code needs to be updated. Rank dimensions lowest to highest and sum the ranks. Sum dimension ranks to get V2 of the utility score. Then compare the two utility scores in a scatterplot.
+-   Is the best-performing alert definition different?
+
+```{r}
+#| label: prep_total_util_data_sens
+#| echo: false
+#| eval: false
+
+def_complete_dat_v2 <- dplyr::full_join(def_impact_dat, def_eff_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_ppv_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_missed_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_delay_dat, by = c("alert_number", "pop_brk")) %>%
+  OutbreakExtractR::add_alert_stringency() %>%
+  dplyr::select(pop_brk, alert_lab, alert_type, alert_stringency,
+                impact_mean, eff_mean, ppv, missed_prop, delay_mean,
+                std_impact, std_eff, std_ppv, std_missed, std_delay
+  ) %>%
+  dplyr::mutate(across(impact_mean:delay_mean, ~round(.x, 1)), across(contains("std_"), ~round(.x, 1))) %>%
+  dplyr::mutate(util_score_v2 = rowSums(dplyr::across(contains("std_")))) %>%
+  dplyr::arrange(desc(util_score_v2)) 
+  
+```
+
+
+
+```{r}
+#| label: utility_sens_analysis
+#| echo: true
+
+library(ggrepel)
+library(patchwork)  
+
+## clean labels for plots
+clean_labels <- c(
+  std_impact = "Std Impact",
+  rank_impact = "Ranked Impact",
+  std_eff = "Std Efficiency",
+  rank_eff = "Ranked Efficiency",
+  std_ppv = "Std PPV",
+  rank_ppv = "Ranked PPV",
+  std_missed = "Std Missed",
+  rank_missed = " Ranked Missed",
+  std_delay = "Std Delay",
+  rank_delay = "Ranked Delay",
+  util_score = "Utility Score",
+  util_score_v2 = "Utility Score v2",
+  pop_brk = "Population"
+)
+
+## scatterplot function
+plot_comparison <- function(compare_dat, x_col, y_col, color_var = "pop_brk") {
+  ggplot(compare_dat, aes(
+    x = !!rlang::sym(x_col),
+    y = !!rlang::sym(y_col),
+    color = !!rlang::sym(color_var)
+  )) +
+    geom_point(size = 3) +
+    geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "gray40") +
+    ggrepel::geom_text_repel(aes(label = alert_lab), size = 3) +
+    theme_minimal(base_size = 12) +
+    labs(
+      x = clean_labels[[x_col]],
+      y = clean_labels[[y_col]],
+      color = clean_labels[[color_var]]
+    )
+}
+
+## Rank-sum utility score function
+calc_rank_sum_util_high_good <- function(dat,
+                                         metrics_high_better = c("impact_mean", "eff_mean", "ppv"),
+                                         metrics_low_better  = c("missed_prop", "delay_mean")) {
+
+  dat %>%
+    dplyr::group_by(pop_brk) %>%
+    dplyr::mutate(
+      ## high-better metrics: high value gives high rank
+      across(all_of(metrics_high_better), ~ dplyr::min_rank(.x), .names = "rank_{.col}"),
+
+      ## Low-better metrics: low value gives high rank
+      across(all_of(metrics_low_better), ~ dplyr::min_rank(max(.x, na.rm = TRUE) - .x), .names = "rank_{.col}")
+    ) %>%
+    ## sum all ranks: higher total = better alert
+    dplyr::mutate(util_score_v2 = rowSums(dplyr::across(starts_with("rank_")), na.rm = TRUE)) %>%
+    dplyr::arrange(pop_brk, dplyr::desc(util_score_v2)) %>%  
+    dplyr::ungroup()  
+}
+
+
+## combining datasets and computing utility version 2
+def_complete_dat_v2 <- dplyr::full_join(def_impact_dat, def_eff_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_ppv_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_missed_dat, by = c("alert_number", "pop_brk")) %>%
+  dplyr::full_join(def_delay_dat, by = c("alert_number", "pop_brk")) %>%
+  OutbreakExtractR::add_alert_stringency() %>%
+  dplyr::select(pop_brk, alert_lab, alert_type, alert_stringency,
+                impact_mean, eff_mean, ppv, missed_prop, delay_mean)
+
+def_complete_dat_sens <- calc_rank_sum_util_high_good(def_complete_dat_v2)
+
+## utility score comparison
+compare_scores_util <- def_complete_dat %>%
+  dplyr::select(alert_lab, pop_brk, util_score) %>%
+  dplyr::left_join(
+    def_complete_dat_sens %>%
+      dplyr::select(alert_lab, pop_brk, util_score_v2),
+    by = c("alert_lab", "pop_brk")
+  )
+
+plot_util_total <- plot_comparison(compare_scores_util, x_col = "util_score", y_col = "util_score_v2")
+print(plot_util_total)
+
+
+## compare standardised metrics to ranked raw metrics
+compare_scores_dim <- def_complete_dat %>%
+  dplyr::select(alert_lab, pop_brk, std_impact, std_eff, std_ppv, std_missed, std_delay) %>%
+  dplyr::left_join(
+    def_complete_dat_sens %>%
+      dplyr::select(alert_lab, pop_brk,
+                    rank_impact_mean, rank_eff_mean, rank_ppv,
+                    rank_missed_prop, rank_delay_mean),
+    by = c("alert_lab", "pop_brk")
+  ) %>%
+  
+  ## renaming for clarity
+  dplyr::rename(
+    rank_impact = rank_impact_mean,
+    rank_eff    = rank_eff_mean,
+    rank_ppv    = rank_ppv,
+    rank_missed = rank_missed_prop,
+    rank_delay  = rank_delay_mean
+  )
+
+dimension_pairs <- list(
+  impact = c("std_impact", "rank_impact"),
+  eff    = c("std_eff", "rank_eff"),
+  ppv    = c("std_ppv", "rank_ppv"),
+  missed = c("std_missed", "rank_missed"),
+  delay  = c("std_delay", "rank_delay")
+)
+
+dimension_plots <- lapply(names(dimension_pairs), function(dim) {
+  x_col <- dimension_pairs[[dim]][1]
+  y_col <- dimension_pairs[[dim]][2]
+  plot_comparison(compare_scores_dim, x_col = x_col, y_col = y_col)
+})
+
+
+all_plots <- (
+  plot_util_total +
+  dimension_plots[[1]] + dimension_plots[[2]] +
+  dimension_plots[[3]] + dimension_plots[[4]] + dimension_plots[[5]]
+) +
+  plot_layout(ncol = 2, guides = "collect") +
+  plot_annotation(
+    title = "Comparison of Standardised and Raw (Ranked) Metrics Across Dimensions",
+    theme = theme(
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      axis.title.y = element_text(margin = margin(r = 10)),  # adds space to y labels
+      plot.margin = margin(15, 10, 15, 10)
+    )
+  )
+
+all_plots
+
+```
+
+#### Sensitivity of Utility Score by country 
+
+-   Examine country-specific utility scores and compare them to the overall one. If there is a lot of heterogeneity in the best-performing alert definition across countries, we can comment on how we really need context-dependent alert definitions.
+-   N.B. Include only outbreak-prone subnational locations for the main population group
+
+```{r}
+#| label: prep_country_utility_data
+#| echo: true
+
+means_impact_eff_country_dat <- prep_impact_eff_dat %>%
+  dplyr::filter(pop_brk == "[50k, 500k)") %>% ## we are only interested in the main population group
+  dplyr::group_by(alert_number, alert_type, country) %>%
+  dplyr::summarise(impact_mean = mean(impact), eff_mean = mean(eff)) %>%
+  dplyr::ungroup()
+
+means_delay_country_dat <- prep_missed_delay_dat %>%
+  dplyr::filter(pop_brk == "[50k, 500k)") %>% ## we are only interested in the main population group
+  dplyr::group_by(alert_number, alert_type, country) %>%
+  dplyr::summarise(delay_mean = mean(delay, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+n_country_outbreaks <- linked_cl_large %>%
+  dplyr::filter(pop_brk == "[50k, 500k)") %>% ## we are only interested in the main population group
+  dplyr::distinct(outbreak_UID, country) %>%
+  dplyr::group_by(country) %>%
+  dplyr::summarise(n_outbreaks = n())
+
+fig_impact_country_dat <- dplyr::group_by(prep_impact_eff_dat %>% dplyr::filter(pop_brk == "[50k, 500k)"),
+                                          alert_number, alert_type, country) %>%
+  dplyr::reframe(quibble2(impact)) %>%
+  tidyr::pivot_wider(names_from = impact_q, names_glue = "{.value}_{impact_q}", values_from = impact) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_country_dat, alert_number, alert_type, country, impact_mean), by = c("alert_number", "alert_type", "country")) %>%
+  prepare_fig_dat()
+
+fig_eff_country_dat <- dplyr::group_by(prep_impact_eff_dat %>% dplyr::filter(pop_brk == "[50k, 500k)"), alert_number, alert_type, country) %>%
+  dplyr::reframe(quibble2(eff)) %>%
+  tidyr::pivot_wider(names_from = eff_q, names_glue = "{.value}_{eff_q}", values_from = eff) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_country_dat, alert_number, alert_type, country, eff_mean), by = c("alert_number", "alert_type", "country")) %>%
+  prepare_fig_dat()
+
+fig_ppv_country_dat <- dplyr::group_by(prep_ppv_dat %>% dplyr::filter(pop_brk == "[50k, 500k)"),
+                                       alert_number, alert_type, country) %>%
+  dplyr::summarise(alerts = n(), true_positives = sum(true_positives), ppv = round(true_positives/alerts, 2)) %>%
+  prepare_fig_dat()
+
+fig_missed_country_dat <- dplyr::group_by(prep_missed_delay_dat %>% dplyr::filter(pop_brk == "[50k, 500k)"),
+  alert_number, alert_type, country) %>%
+  dplyr::summarise(n_detected = sum(is_triggered)) %>%
+  dplyr::left_join(n_country_outbreaks, by = c("country")) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(n_missed = n_outbreaks - n_detected,
+                missed_prop = n_missed/n_outbreaks) %>%
+  prepare_fig_dat()
+
+fig_delay_country_dat <- dplyr::group_by(prep_missed_delay_dat %>% dplyr::filter(pop_brk == "[50k, 500k)"),
+  alert_number, alert_type, country) %>%
+  dplyr::reframe(quibble2(delay)) %>%
+  dplyr::ungroup() %>%
+  tidyr::pivot_wider(names_from = delay_q, names_glue = "{.value}_{delay_q}", values_from = delay) %>%
+  dplyr::full_join(means_delay_country_dat, by = c("alert_number", "alert_type", "country")) %>%
+  prepare_fig_dat()
+
+fig_complete_country_dat <- dplyr::full_join(fig_impact_country_dat, fig_eff_country_dat, by = c("alert_number", "alert_type", "country", "alert_lab")) %>%
+  dplyr::full_join(fig_ppv_country_dat, by = c("alert_number", "alert_type", "country", "alert_lab")) %>%
+  dplyr::full_join(fig_missed_country_dat, by = c("alert_number", "alert_type", "country", "alert_lab")) %>%
+  dplyr::full_join(fig_delay_country_dat, by = c("alert_number", "alert_type", "country", "alert_lab"))
+
+
+def_impact_country_dat <- fig_impact_country_dat %>%
+  dplyr::group_by(country) %>%
+  dplyr::mutate(std_impact = as.vector(scale(impact_mean, center = TRUE, scale = TRUE))) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(country, desc(std_impact)) %>%
+  dplyr::select(alert_number, alert_type, country, alert_lab, impact_mean, std_impact)
+
+def_eff_country_dat <- fig_eff_country_dat %>%
+  dplyr::group_by(country) %>%
+  dplyr::mutate(std_eff = as.vector(scale(eff_mean, center = TRUE, scale = TRUE))) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(country, desc(std_eff)) %>%
+  dplyr::select(alert_number, alert_type, country, alert_lab, eff_mean, std_eff)
+
+def_ppv_country_dat <- fig_ppv_country_dat %>%
+  dplyr::group_by(country) %>%
+  dplyr::mutate(std_ppv = as.vector(scale(ppv, center = TRUE, scale = TRUE))) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(country, desc(std_ppv)) %>%
+  dplyr::select(alert_number, alert_type, country, alert_lab, ppv, std_ppv, alerts, true_positives)
+
+## multiply by -1 so that the scale is reversed (so higher standardized value represents higher utility (lower proportion of missed outbreaks and smaller delay mean higher utility))
+def_missed_country_dat <- fig_missed_country_dat %>%
+  dplyr::group_by(country) %>%
+  dplyr::mutate(std_missed = as.vector(scale(missed_prop, center = TRUE, scale = TRUE)) *-1) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(country, desc(std_missed)) %>%
+  dplyr::select(alert_number, alert_type, country, alert_lab, missed_prop, std_missed)
+
+## multiply by -1 so that the scale is reversed (so higher standardized value represents higher utility (lower proportion of missed outbreaks and smaller delay mean higher utility))
+def_delay_country_dat <- fig_delay_country_dat %>%
+  dplyr::group_by(country) %>%
+  dplyr::mutate(std_delay = as.vector(scale(delay_mean, center = TRUE, scale = TRUE)) *-1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(alert_number, alert_type, country, alert_lab, delay_mean, std_delay) %>%
+  dplyr::arrange(country, desc(std_delay))
+
+def_complete_country_dat <- dplyr::full_join(def_impact_country_dat, def_eff_country_dat, by = c("alert_number","alert_type", "country", "alert_lab")) %>%
+  dplyr::full_join(def_ppv_country_dat, by = c("alert_number", "alert_type", "country", "alert_lab")) %>%
+  dplyr::full_join(def_missed_country_dat, by = c("alert_number", "alert_type", "country", "alert_lab")) %>%
+  dplyr::full_join(def_delay_country_dat, by = c("alert_number","alert_type", "country", "alert_lab")) %>%
+  OutbreakExtractR::add_alert_stringency() %>%
+  dplyr::select(country, alert_lab, alert_type, alert_stringency,
+                impact_mean, eff_mean, ppv, missed_prop, delay_mean,
+                std_impact, std_eff, std_ppv, std_missed, std_delay
+  ) %>%
+  dplyr::mutate(across(impact_mean:delay_mean, ~round(.x, 1)), across(contains("std_"), ~round(.x, 1))) %>%
+  dplyr::mutate(util_score = rowSums(dplyr::across(contains("std_")))) %>%
+  dplyr::arrange(desc(util_score)) 
+
+write.csv(def_complete_country_dat, "complete_country_utility_data_mean_sd.csv")
+  
+```
+
+### Supplement Fig Proposal
+
+#### Stringency vs Utility score, all population groups
+
+```{r}
+#| label: fig-stringency-utility
+#| fig-width: 4
+#| fig-height: 4
+#| echo: true
+
+ggplot2::ggplot(def_complete_dat, aes(x = util_score, y = alert_stringency)) +
+  geom_point(aes(colour = alert_type, alpha = alert_stringency)) +
+  scale_x_continuous("Utility Score") +
+  scale_y_discrete("Alert Stringency") +
+  scale_colour_brewer("Alert Type", palette = "Dark2") +
+  theme_bw() +
+  theme(legend.position = "right") +
+  guides(alpha = "none")
+
+```
+
+#### Dimension score pairs plot, all population groups
+
+```{r}
+#| label: fig-score-tradeoffs
+#| fig-width: 6
+#| fig-height: 6
+#| echo: true
+
+fig_score_allpop <- GGally::ggpairs(def_complete_dat, 
+                columns = 10:14, 
+                ggplot2::aes(colour = alert_type, fill = alert_type, alpha = 0.8),
+                upper = "blank", 
+                lower = list(continuous = "points"),
+                switch = "both",
+                axisLabels = "none",
+#                columnLabels = c("Impact", "Efficiency", "PPV", "Missed", "Delay")) +
+                columnLabels = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness")) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer("Alert Type", palette = "Dark2") +
+  theme_bw() 
+
+fig_score_allpop
+
+## Pooled spearman correlations
+
+data_subset <- def_complete_dat[, 10:14]
+#labels <- c("Impact", "Efficiency", "PPV", "Missed", "Delay")
+labels <- c("Impact", "Efficiency", "PPV", "Missed", "Timeliness")
+colnames(data_subset) <- labels
+
+vars <- colnames(data_subset)
+pairs <- combn(vars, 2, simplify = FALSE)
+
+corr_results <- map_dfr(pairs, ~{
+  test <- cor.test(data_subset[[.x[1]]], data_subset[[.x[2]]], 
+                   method = "spearman", exact = FALSE)
+  tibble(
+    Dimension1 = .x[1],
+    Dimension2 = .x[2],
+    Correlation = round(test$estimate, 2),
+    P_value = test$p.value
+  )
+})
+
+corr_results %>%
+  kable(caption = "Pairwise Spearman correlations with p-values") %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+### Supplement Fig Backup
+
+#### Stringency by Total Utility, faceted by population
+
+```{r}
+#| label: fig-stringency-score-supp
+#| fig-width: 4
+#| fig-height: 3
+#| echo: true
+
+ggplot2::ggplot(def_complete_dat, aes(x = util_score, y = alert_stringency)) +
+  geom_point(aes(colour = alert_type, alpha = alert_stringency)) +
+  scale_x_continuous("Utility Score") +
+  scale_y_discrete("Stringency") +
+  scale_colour_brewer("Alert Type", palette = "Dark2") +
+  theme_bw() +
+  theme(legend.position = "right") +
+  guides(alpha = "none") +
+  facet_wrap(~pop_brk, ncol = 1)
+```
+
+#### Stringency vs Dimension Score, faceted by population
+
+```{r}
+#| label: fig-stringency-utility-dimension
+#| fig-width: 5
+#| fig-height: 5
+#| echo: true
+
+def_complete_dat_longdim <- dplyr::select(def_complete_dat, pop_brk, alert_lab, alert_type, alert_stringency, dplyr::contains("std_")) %>%
+  tidyr::pivot_longer(contains("std_"), names_to = "dimension", values_to = "score") %>%
+  dplyr::mutate(dimension = stringr::str_remove(dimension, "std_"))
+
+ggplot2::ggplot(def_complete_dat_longdim, aes(x = score, y = alert_stringency)) +
+  geom_point(aes(colour = alert_type, alpha = alert_stringency)) +
+  scale_x_continuous("Dimension Score") +
+  scale_y_discrete("Alert Stringency") +
+  scale_colour_brewer("Alert Type", palette = "Dark2") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  guides(alpha = "none") +
+  facet_grid(pop_brk~ dimension)
+
+```
+
+#### Dimension score pairs plot, 50-500k
+
+```{r}
+#| label: fig-dimension-score-pairs
+#| fig-width: 6
+#| fig-height: 6
+#| echo: true
+
+GGally::ggpairs(dplyr::filter(def_complete_dat, pop_brk == "[50k, 500k)"), 
+                columns = 10:14, 
+                ggplot2::aes(colour = alert_type, fill = alert_type, alpha = 0.8),
+                upper = "blank", 
+                lower = list(continuous = "points"),
+                switch = "both",
+                axisLabels = "none",
+#                columnLabels = c("Impact", "Efficiency", "PPV", "Missed", "Delay")) +
+                columnLabels = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness")) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer("Alert Type", palette = "Dark2") +
+  theme_bw() 
+
+```
+
+## Best-performing alert definitions
+
+### Top 4 Raw Metrics and Total Score Table for Different Dimension Score Cutoffs
+
+-   Added SD for impact, efficiency, and delay metrics
+-   Added number of alerts for PPV metric (denominator)
+-   Added number of outbreaks for missed metric (denominator)
+
+```{r}
+#| label: tab-top5
+#| echo: false
+#| eval: false
+
+tab_top_def_dat <- def_complete_dat %>%
+  dplyr::select(pop_brk, alert_lab, alert_type, impact_mean, eff_mean, ppv, missed_prop, delay_mean, util_score) %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::arrange(pop_brk, desc(util_score)) %>%
+  dplyr::mutate(rank = 1:n()) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(rank <= 5) %>%
+  dplyr::select(-rank)
+
+reactable_template(tab_top_def_dat,
+                  col_names = list(pop_brk = reactable::colDef(name = "Population"),
+                                   alert_lab = reactable::colDef(name = "Alert Definition"),
+                                   alert_type = reactable::colDef(name = "Alert Type"),
+                                   impact_mean = reactable::colDef(name = "Impact: cases"),
+                                   eff_mean = reactable::colDef(name = "Efficiency: per target pop"),
+                                   ppv = reactable::colDef(name = "PPV >300 cases: prop"),
+                                   missed_prop = reactable::colDef(name = "Missed Outbreaks: prop"),
+                                   delay_mean = reactable::colDef(name = "Delay: weeks from outbreak start"),
+                                   util_score = reactable::colDef(name = "Util Score", defaultSortOrder = "desc")))
+
+
+```
+
+
+```{r}
+#| label: prepare-top4-data
+#| echo: true
+
+## automating best definition selection based on quantitative threshold
+full_dat <- def_complete_dat %>%
+  dplyr::select(pop_brk, alert_lab, util_score,
+                std_impact, std_eff, std_ppv, std_missed, std_delay) 
+
+## make datasets long for plotting
+full_long <- full_dat %>%
+  pivot_longer(cols = c(std_impact, std_eff, std_ppv, std_missed, std_delay),
+               names_to = "dimension", values_to = "score") %>%
+  OutbreakExtractR::label_dimensions()
+
+
+```
+
+
+```{r, fig.width=20, fig.height=15}
+#| label: top4-histogram
+#| echo: true
+
+## function to automate quantitative cutoff exploration
+get_top_for_threshold <- function(full_dat, cutoff_val, no_top = 4) {
+  score_cols <- c("std_impact", "std_eff", "std_ppv", "std_missed", "std_delay")
+  
+  top4_dat <- full_dat %>%
+    rowwise() %>%
+    mutate(min_score = min(c_across(all_of(score_cols)), na.rm = TRUE)) %>%
+    ungroup() %>%
+    filter(min_score >= cutoff_val) %>%
+    group_by(pop_brk) %>%
+    arrange(desc(util_score)) %>%
+    slice_head(n = no_top) %>%
+    ungroup()
+  
+  return(top4_dat)
+}
+
+## function to make histograms per threshold
+make_static_top4_counts <- function(full_long, full_dat, cutoff_val, bins = 20) {
+
+  ## filter top 4 per group based on cutoff
+  top4_dat <- get_top_for_threshold(full_dat, cutoff_val, 4)
+  
+  if(nrow(top4_dat) > 0){
+    ## long format
+    top4_long <- top4_dat %>%
+      pivot_longer(
+        cols = c(std_impact, std_eff, std_ppv, std_missed, std_delay),
+        names_to = "dimension",
+        values_to = "score"
+      ) %>%
+      OutbreakExtractR::label_dimensions() %>%
+      dplyr::select(pop_brk, alert_lab, dimension, score, util_score)
+  } else {
+    top4_long <- NULL
+  }
+  
+  x_range <- range(full_long$score, na.rm = TRUE)
+  
+  ## histograms
+  p <- ggplot(full_long, aes(x = score)) +
+    geom_histogram(
+      bins = bins,
+      fill = "lightblue",
+      color = "white",
+      alpha = 0.6
+    )  +
+    facet_wrap(~ pop_brk + dimension,
+               scales = "fixed",
+               ncol = length(unique(full_long$dimension))) +
+    coord_cartesian(xlim = x_range, expand = TRUE) +
+    scale_x_continuous(expand = expansion(mult = 0.05)) +
+    labs(
+      title = paste0("Cutoff ≥ ", cutoff_val),
+      x = "Dimension score",
+      y = "Count"
+    ) +
+    theme_minimal(base_size = 24) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      panel.grid.minor = element_blank(),
+      panel.spacing = unit(2, "lines"),
+      plot.margin = margin(10, 10, 10, 10)
+    )
+
+  ## lines per alert
+  if(!is.null(top4_long)){
+    p <- p +
+      geom_vline(
+        data = top4_long,
+        aes(
+          xintercept = score,
+          color = alert_lab,  
+          group = alert_lab   
+        ),
+        linetype = "dashed",
+        linewidth = 0.6,
+        alpha = 0.4
+      ) +
+      scale_color_viridis_d(option = "turbo", name = "Top 4 Alerts")
+  }
+
+  return(p)
+}
+
+
+# plots for different cutoffs
+cutoff_values <- seq(from = -1, to = -0.5, by = 0.1)
+for(thresh in cutoff_values){
+  p <- make_static_top4_counts(full_long, full_dat, cutoff_val = thresh) +
+       ggtitle(paste0("Cutoff Threshold: ", thresh))
+  print(p)  
+}
+
+```
+
+```{r}
+#| label: tab-top4-by-cutoff
+#| echo: true
+#| results: asis
+
+## choose whether to use SD or IQR metrics
+
+if (use_iqr) {
+  metrics_dat <- def_complete_dat_added_IQR
+  spread_impact <- "iqr_impact"
+  spread_eff <- "iqr_eff"
+  spread_delay <- "iqr_delay"
+  spread_label <- "IQR"
+} else {
+  metrics_dat <- def_complete_dat_added
+  spread_impact <- "sd_impact"
+  spread_eff <- "sd_eff"
+  spread_delay <- "sd_delay"
+  spread_label <- "SD"
+}
+
+top_tables_list <- list()
+n <- 4
+for (thresh in cutoff_values) {
+  
+  ## get top alerts above threshold
+  top_dat <- get_top_for_threshold(
+    full_dat,
+    cutoff_val = thresh,
+    no_top = n
+  )
+  
+  if (nrow(top_dat) > 0) {
+    
+    ## merge additional metrics
+    top_table <- top_dat %>%
+      dplyr::left_join(
+        metrics_dat %>%
+          dplyr::select(
+            pop_brk, alert_lab, alert_type,
+            impact_mean, !!spread_impact,
+            eff_mean, !!spread_eff,
+            ppv, n_alerts,
+            missed_prop, n_outbreaks,
+            delay_mean, !!spread_delay
+          ) %>%
+          dplyr::distinct(pop_brk, alert_lab, .keep_all = TRUE),
+        by = c("pop_brk", "alert_lab")
+      ) %>%
+      dplyr::mutate(
+        impact_mean = paste0(impact_mean, " (", .data[[spread_impact]], ")"),
+        eff_mean = paste0(eff_mean, " (", .data[[spread_eff]], ")"),
+        delay_mean = paste0(delay_mean, " (", .data[[spread_delay]], ")"),
+        ppv = paste0(ppv, " (", n_alerts, ")"),
+        missed_prop = paste0(missed_prop, " (", n_outbreaks, ")")
+      ) %>%
+      dplyr::select(
+        pop_brk, alert_lab, alert_type,
+        impact_mean, eff_mean, ppv,
+        missed_prop, delay_mean, util_score
+      ) %>%
+      dplyr::group_by(pop_brk) %>%
+      dplyr::arrange(pop_brk, desc(util_score)) %>%
+      dplyr::mutate(rank = dplyr::row_number()) %>%
+      dplyr::ungroup() %>%
+      dplyr::filter(rank <= n) %>%
+      dplyr::select(-rank)
+    
+    
+    ## label population groups
+    top_table <- top_table %>%
+      dplyr::mutate(
+        pop_brk = forcats::fct_recode(
+          pop_brk,
+          "Administrative units with <50,000 people" = "< 50k",
+          "Administrative units with 50,000 to 500,000 people" = "[50k, 500k)",
+          "Administrative units with ≥500,000 people" = "≥ 500k"
+        )
+      ) %>%
+      dplyr::arrange(pop_brk, desc(util_score))
+    
+    
+    ## count rows per group
+    group_counts <- top_table %>%
+      dplyr::count(pop_brk) %>%
+      dplyr::pull(n)
+    
+    top_rows <- cumsum(c(1, head(group_counts, -1)))
+    
+    
+    ## rename columns for table
+    tab_for_kable <- top_table %>%
+      dplyr::select(
+        pop_brk,
+        alert_lab,
+        alert_type,
+        impact_mean,
+        eff_mean,
+        ppv,
+        missed_prop,
+        delay_mean,
+        util_score
+      ) %>%
+      dplyr::rename(
+        "Alert Definition" = alert_lab,
+        "Alert Type" = alert_type,
+        !!paste0("Impact: cases (", spread_label, ")") := impact_mean,
+        !!paste0("Efficiency: cases per 1000 target population (", spread_label, ")") := eff_mean,
+        "PPV: proportion of alerts (N alerts)" = ppv,
+        "Missed: proportion of outbreaks (N outbreaks)" = missed_prop,
+        !!paste0("Delay: weeks from outbreak start (", spread_label, ")") := delay_mean,
+        "Utility Score" = util_score
+      )
+    
+    ## save csv
+    write.csv(
+      tab_for_kable,
+      file = paste0(fig_path,"/top_alerts_cutoff_", thresh,"_",ocv_status,".csv"),
+      row.names = FALSE
+    )
+    
+    
+    ## create kable
+    table_kbl <- tab_for_kable %>%
+      dplyr::select(-pop_brk) %>%
+      kableExtra::kbl(
+        caption = paste0(
+          "Top Alerts by Utility Score per Population Group (Cutoff ≥ ",
+          thresh, ")"
+        )
+      ) %>%
+      kableExtra::kable_styling(
+        latex_options = "basic",
+        full_width = TRUE,
+        position = "center"
+      )
+    
+    
+    ## add grouped rows automatically
+    start_row <- 1
+    
+    for (i in seq_along(group_counts)) {
+      
+      end_row <- start_row + group_counts[i] - 1
+      
+      table_kbl <- table_kbl %>%
+        kableExtra::group_rows(
+          group_label = levels(top_table$pop_brk)[i],
+          start_row = start_row,
+          end_row = end_row
+        )
+      
+      start_row <- end_row + 1
+    }
+    
+    
+    ## highlight top alert per group
+    table_kbl <- table_kbl %>%
+      kableExtra::row_spec(
+        top_rows,
+        bold = TRUE,
+        background = "#d4edda"
+      )
+    
+    
+    top_tables_list[[as.character(thresh)]] <- table_kbl
+    
+  } else {
+    
+    top_tables_list[[as.character(thresh)]] <-
+      htmltools::tags$p(
+        paste0(
+          "Cutoff ≥ ",
+          thresh,
+          ": No alerts meet the threshold."
+        )
+      )
+  }
+}
+
+for (tbl in top_tables_list) {
+  print(tbl)
+}
+
+```
+
+### Table with top x alerts per pop group by utility score plus one that has no dimension under the cutoff
+
+#### Main population group
+
+```{r}
+#| label: tab-top4-manuscript_mainpop
+#| echo: true
+#| results: asis
+
+## function to get highest utility alert based on quant cutoff
+get_top_for_threshold <- function(full_dat, cutoff_val, no_top = 1, pop_keep = NULL) {
+
+  score_cols <- c("std_impact", "std_eff", "std_ppv", "std_missed", "std_delay")
+
+  dat_with_min <- full_dat %>%
+    rowwise() %>%
+    mutate(min_score = min(c_across(all_of(score_cols)), na.rm = TRUE)) %>%
+    ungroup()
+
+  if (!is.null(pop_keep)) {
+    dat_with_min <- dat_with_min %>%
+      dplyr::filter(pop_brk %in% pop_keep)
+  }
+
+  ## top alert by util_score per pop_brk (no filtering by cutoff)
+  top_n_per_pop <- dat_with_min %>%
+    group_by(pop_brk) %>%
+    arrange(desc(util_score)) %>%
+    slice_head(n = no_top) %>%
+    ungroup()
+
+  ## best alert per pop that passes all dims
+  best_passing_per_pop <- dat_with_min %>%
+    filter(min_score >= cutoff_val) %>%
+    group_by(pop_brk) %>%
+    arrange(desc(util_score)) %>%
+    slice_head(n = 1) %>%
+    ungroup()
+
+  bind_rows(top_n_per_pop, best_passing_per_pop) %>%
+    distinct(pop_brk, alert_lab, .keep_all = TRUE)
+}
+
+make_top_alerts_table_select_pop <- function(full_dat, def_dat, cutoff = -1, pop_keep = NULL) {
+  
+  top_dat <- get_top_for_threshold(
+    full_dat,
+    cutoff_val = cutoff,
+    no_top = 1,
+    pop_keep = pop_keep
+  )
+  
+  if (nrow(top_dat) == 0) return(NULL)
+  
+  long_labels <- function(x) {
+    case_when(
+      x == "< 50k" ~ "Administrative units with <50,000 people",
+      x == "[50k, 500k)" ~ "Administrative units with 50,000 to 500,000 people",
+      x == "≥ 500k" ~ "Administrative units with ≥500,000 people",
+      TRUE ~ x
+    )
+  }
+  
+  top_table <- top_dat %>%
+    left_join(
+      def_dat %>%
+        select(
+          pop_brk, alert_lab, alert_type,
+          impact_mean, sd_impact,
+          eff_mean, sd_eff,
+          ppv, n_alerts,
+          missed_prop, n_outbreaks,
+          delay_mean, sd_delay
+        ) %>%
+        distinct(pop_brk, alert_lab, .keep_all = TRUE),
+      by = c("pop_brk", "alert_lab")
+    ) %>%
+    mutate(
+      impact_mean = paste0(impact_mean, " (", sd_impact, ")"),
+      eff_mean = paste0(eff_mean, " (", sd_eff, ")"),
+      delay_mean = paste0(delay_mean, " (", sd_delay, ")"),
+      ppv = paste0(ppv, " (", n_alerts, ")"),
+      missed_prop = paste0(missed_prop, " (", n_outbreaks, ")"),
+      best_passing_flag = !is.na(min_score) & min_score >= cutoff,
+      pop_brk = factor(long_labels(pop_brk))  # apply descriptive labels
+    ) %>%
+    arrange(pop_brk, desc(util_score)) %>%
+    group_by(pop_brk) %>%
+    mutate(rank = row_number()) %>%
+    ungroup()
+  
+  best_pass_rows <- which(top_table$best_passing_flag)
+  top_table <- top_table %>% select(-best_passing_flag)
+  
+  tab_for_kable <- top_table %>%
+    select(alert_lab, alert_type, impact_mean, eff_mean, ppv, missed_prop, delay_mean, util_score) %>%
+    rename(
+      "Alert Definition" = alert_lab,
+      "Alert Type" = alert_type,
+      "Impact: cases (SD)" = impact_mean,
+      "Efficiency: cases per 1000 target population (SD)" = eff_mean,
+      "PPV: proportion of alerts (N alerts)" = ppv,
+      "Missed: proportion of outbreaks (N outbreaks)" = missed_prop,
+      "Delay: weeks from outbreak start (SD)" = delay_mean,
+      "Utility Score" = util_score
+    )
+  
+  table_kbl <- tab_for_kable %>%
+    kbl(caption = paste0("Top Alerts by Utility Score per Population Group (Cutoff ≥ ", cutoff, ")")) %>%
+    kable_styling(latex_options = "basic", full_width = TRUE, position = "center")
+  
+  # Add group rows
+  group_counts <- top_table %>% count(pop_brk) %>% pull(n)
+  start <- 1
+  for (i in seq_along(group_counts)) {
+    table_kbl <- table_kbl %>%
+      group_rows(levels(top_table$pop_brk)[i], start_row = start, end_row = start + group_counts[i] - 1)
+    start <- start + group_counts[i]
+  }
+  
+  ## highlight top row per group
+  top_rows <- cumsum(c(1, head(group_counts, -1)))
+  table_kbl <- table_kbl %>% row_spec(top_rows, bold = TRUE, background = "white")
+  
+  ## highlight best-passing rows
+  if (length(best_pass_rows) > 0) {
+    table_kbl <- table_kbl %>% row_spec(best_pass_rows, bold = TRUE, background = "white")
+  }
+  
+  return(table_kbl)
+}
+
+
+table_main <- make_top_alerts_table_select_pop(
+  full_dat,
+  def_complete_dat_added,
+  pop_keep = "[50k, 500k)"  ## main population group
+)
+print(table_main)
+
+```
+
+#### Population groups in the supplement
+
+```{r}
+#| label: tab-top4-manuscript_supplement_popgroups
+#| echo: true
+#| results: asis
+
+table_small_large <- make_top_alerts_table_select_pop(
+  full_dat,
+  def_complete_dat_added,
+  pop_keep = c("< 50k", "≥ 500k")
+)
+print(table_small_large)
+
+
+```
+
+#### All population groups
+
+```{r}
+#| label: tab-top4-manuscript_all_popgroups
+#| echo: true
+#| results: asis
+
+## all populations
+
+table_all <- make_top_alerts_table_select_pop(full_dat, def_complete_dat_added)
+print(table_all)
+
+```
+
+### NEW 24 Nov: Tables with top x alerts (one per pop group) by utility score and cutoff
+
+```{r}
+#| label: tab-top4-version3
+#| echo: true
+#| results: asis
+
+## function compute failing dimensions 
+get_fail_dims <- function(row, cutoff) {
+  dims <- c("std_impact", "std_eff", "std_ppv", "std_missed", "std_delay")
+  # descriptive names
+  name_map <- c(
+    std_impact = "impact",
+    std_eff = "efficiency",
+    std_ppv = "ppv",
+    std_missed = "missed",
+    std_delay = "delay"
+  )
+  
+  fails <- dims[row[dims] < cutoff]
+  if (length(fails) == 0) return(NA_character_)
+  
+  # convert to descriptive names
+  clean_names <- name_map[fails]
+  paste0(clean_names, "<", cutoff, collapse = ", ")
+}
+
+
+## function to get TOP 4 for each cutoff
+get_top4_for_cutoff <- function(full_dat, cutoff_val) {
+  
+  score_cols <- c("std_impact", "std_eff", "std_ppv", "std_missed", "std_delay")
+  
+  dat_with_min <- full_dat %>%
+    rowwise() %>%
+    mutate(min_score = min(c_across(all_of(score_cols)), na.rm = TRUE)) %>%
+    ungroup()
+  
+  top4 <- dat_with_min %>%
+    group_by(pop_brk) %>%
+    arrange(desc(util_score)) %>%
+    slice_head(n = 4) %>%
+    ungroup() %>%
+    mutate(is_top4 = TRUE)
+  
+  return(top4)
+}
+
+## loop over cutoff values to perform the sensitivity analysis
+cutoff_values <- seq(from = -1, to = -0.5, by = 0.1)
+
+top4_across_cutoffs <- list()
+
+for (cut in cutoff_values) {
+  top4_across_cutoffs[[as.character(cut)]] <- 
+    get_top4_for_cutoff(full_dat, cutoff_val = cut) %>%
+    mutate(cutoff = cut)
+}
+
+## combine all cutoffs
+combined_top4 <- bind_rows(top4_across_cutoffs)
+
+all_alerts <- full_dat %>%
+  select(pop_brk, alert_lab, util_score,
+         std_impact, std_eff, std_ppv, std_missed, std_delay)
+
+## per-cutoff indicators
+expanded <- all_alerts %>%
+  crossing(cutoff = cutoff_values) %>%
+  left_join(combined_top4 %>% 
+              select(pop_brk, alert_lab, cutoff, is_top4),
+            by = c("pop_brk", "alert_lab", "cutoff")) %>%
+  mutate(is_top4 = ifelse(is.na(is_top4), FALSE, is_top4))
+
+## failure reasons for each alert-cutoff
+expanded <- expanded %>%
+  rowwise() %>%
+  mutate(fail_dims = ifelse(is_top4,
+                            NA_character_,
+                            get_fail_dims(cur_data(), cutoff))) %>%
+  ungroup()
+
+## 1 column per cutoff
+wide <- expanded %>%
+  mutate(label = ifelse(is_top4,
+                        "top4",
+                        ifelse(is.na(fail_dims), "not top4", fail_dims))) %>%
+  select(pop_brk, alert_lab, cutoff, label) %>%
+  pivot_wider(names_from = cutoff,
+              values_from = label,
+              names_prefix = "cutoff_")
+
+## table for each population group
+final_tables <- wide %>%
+  arrange(pop_brk, alert_lab) %>%
+  group_split(pop_brk) %>%
+  setNames(unique(wide$pop_brk))
+
+table_list <- list()
+
+for (grp in names(final_tables)) {
+  tab <- final_tables[[grp]] %>%
+    rename(
+      `population group` = pop_brk,
+      `alert definition` = alert_lab
+    )
+
+  table_list[[grp]] <- tab %>%
+    kbl(
+      caption = paste0("Alert Definition Performance Across Cutoffs, Population Group: ", grp),
+      align = "l"
+    ) %>%
+    kable_styling(full_width = FALSE)
+}
+
+### print table per population group
+for (nm in names(table_list)) {
+  cat("## ", nm, "\n\n")
+  print(table_list[[nm]])
+  cat("\n\n")
+}
+
+## saving as pngs to paste into manuscript google doc
+library(webshot2)
+library(htmltools)
+
+output_dir <- "table_pngs"
+dir.create(output_dir, showWarnings = FALSE)
+
+for (nm in names(table_list)) {
+  safe_nm <- gsub("[^A-Za-z0-9_-]+", "_", nm)
+  html_file <- file.path(output_dir, paste0("table_", safe_nm, ".html"))
+  png_file  <- file.path(output_dir, paste0("table_", safe_nm, ".png"))
+  
+  htmltools::save_html(
+    htmltools::HTML(as.character(table_list[[nm]])),
+    file = html_file
+  )
+  ## html to png
+  webshot2::webshot(
+    url = html_file,
+    file = png_file,
+    zoom = 2,        
+    vwidth = 1200,   
+    vheight = 800    
+  )
+}
+
+
+```
+
+### Supplement Backup
+
+#### Complete Metrics Table
+
+```{r}
+#| label: tab-complete
+#| echo: false
+#|
+reactable_template(def_complete_dat,
+                  col_names = list(alert_type = reactable::colDef(name = "Alert Type"),
+                                  pop_brk = reactable::colDef(name = "Pop Group"),
+                                  alert_lab = reactable::colDef(name = "Alert Def"),
+                                  util_score = reactable::colDef(name = "Util Score", defaultSortOrder = "desc")))
+```
+
+#### Raw Metrics and Total Score Table
+
+```{r}
+#| label: tab-raw-only
+#| echo: false
+
+reactable_template(dplyr::select(def_complete_dat, -contains("std_")),
+                  col_names = list(alert_type = reactable::colDef(name = "Alert Type"),
+                                  pop_brk = reactable::colDef(name = "Pop Group"),
+                                  alert_lab = reactable::colDef(name = "Alert Def"),
+                                  util_score = reactable::colDef(name = "Util Score", defaultSortOrder = "desc")))
+```
+
+#### Rank Metrics and Rank Score Table
+
+```{r}
+#| label: tab-sensitivity-only
+#| echo: true
+#|
+reactable_template(def_complete_dat_sens,
+                  col_names = list(alert_type = reactable::colDef(name = "Alert Type"),
+                                  pop_brk = reactable::colDef(name = "Pop Group"),
+                                  alert_lab = reactable::colDef(name = "Alert Def"),
+                                  util_score_v2 = reactable::colDef(name = "Util Score", defaultSortOrder = "desc")))
+```
+
+#### Top 4 Alert Definitions by Rank Sum Score
+
+```{r}
+#| label: tab-top4-by-group-sens
+#| echo: true
+#| results: asis
+
+def_top4_by_group_sens <- def_complete_dat_sens %>%
+  group_by(pop_brk) %>%
+  arrange(desc(util_score_v2)) %>%
+  slice_head(n = 4) %>%
+  ungroup() %>%
+  select(pop_brk, alert_lab, alert_type, alert_stringency, 
+         impact_mean, eff_mean, ppv, missed_prop, delay_mean, util_score_v2
+  )  %>%
+  left_join(
+    def_complete_dat %>% select(pop_brk, alert_lab, util_score),
+    by = c("pop_brk", "alert_lab")
+  )
+
+def_top4_by_group_sens <- def_top4_by_group_sens %>%
+  mutate(
+    pop_brk = fct_recode(
+      pop_brk,
+      "Administrative units with <50,000 people" = "< 50k",
+      "Administrative units with 50,000 to 500,000 people" = "[50k, 500k)",
+      "Administrative units with ≥500,000 people" = "≥ 500k"
+    )
+  ) %>%
+  arrange(pop_brk, desc(util_score_v2))
+
+group_counts <- def_top4_by_group_sens %>%
+  count(pop_brk) %>%
+  pull(n)
+
+top_rows <- cumsum(c(1, head(group_counts, -1)))
+
+# Rename columns for clarity
+tab_for_kable <- def_top4_by_group_sens %>%
+  select(
+    alert_lab, alert_type, 
+    
+    impact_mean, eff_mean, ppv, missed_prop, delay_mean,
+    util_score_v2, util_score
+  ) %>%
+  rename(
+    "Alert Definition" = alert_lab,
+    "Alert Type" = alert_type,
+    "Impact: cases" = impact_mean,
+    "Efficiency: per 1000 pop" = eff_mean,
+    "PPV" = ppv,
+    "Missed Proportion" = missed_prop,
+    "Delay (weeks)" = delay_mean,
+    "Utility Score (V2)" = util_score_v2,
+    "Utility Score (Original)" = util_score
+  )
+
+## formatted table
+table_kbl <- tab_for_kable %>%
+  kbl(
+    caption = "Top 4 Alerts by Utility Score V2 per Population Group",
+    align = "lcccccccc"
+  ) %>%
+  kable_styling(
+    full_width = TRUE,
+    position = "center"
+  )
+
+start_row <- 1
+for (i in seq_along(group_counts)) {
+  end_row <- start_row + group_counts[i] - 1
+  table_kbl <- table_kbl %>%
+    group_rows(
+      group_label = levels(def_top4_by_group_sens$pop_brk)[i],
+      start_row = start_row,
+      end_row = end_row
+    )
+  start_row <- end_row + 1
+}
+
+highlight_top_by_group <- def_top4_by_group_sens %>%
+  mutate(
+    highlight_flag = case_when(
+      pop_brk == "Administrative units with <50,000 people" &
+        alert_lab == "≥ 100 total" ~ TRUE,
+
+      pop_brk == "Administrative units with 50,000 to 500,000 people" &
+        alert_lab == "≥ 50 weekly" ~ TRUE,
+
+      pop_brk == "Administrative units with ≥500,000 people" &
+        alert_lab == "≥ 100 weekly" ~ TRUE,
+
+      TRUE ~ FALSE
+    )
+  )
+
+table_kbl <- table_kbl %>%
+  row_spec(which(highlight_top_by_group$highlight_flag), background = "#d4edda")
+
+table_kbl
+
+```
+
+#### Alert Definitions by Utility Score by Country
+
+```{r}
+#| label: tab-all-by-country
+#| echo: true
+
+reactable_template(dplyr::select(def_complete_country_dat, -contains("std_")),
+                  col_names = list(alert_type = reactable::colDef(name = "Alert Type"),
+                                  country = reactable::colDef(name = "Country"),
+                                  alert_lab = reactable::colDef(name = "Alert Def"),
+                                  util_score = reactable::colDef(name = "Util Score", defaultSortOrder = "desc")))
+
+```
+
+
+```{r}
+#| label: fig-utility-by-country
+#| echo: true
+
+ggplot2::ggplot(def_complete_country_dat,
+                ggplot2::aes(x = alert_lab, y = country, fill = util_score)) +
+  ggplot2::geom_tile(color = "white") +
+  ggplot2::scale_fill_viridis_c(option = "D") +
+  ggplot2::labs(
+    title = "Utility Score by Country and Alert Definition",
+    x = "Alert Definition",
+    y = "Country",
+    fill = "Utility Score"
+  ) +
+  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1),
+    axis.text.y = ggplot2::element_text(size = 8)
+  )
+
+
+```
+
+
+####  Best Alert Definition by Utility Score by Country
+
+```{r, out.width='100%'}
+#| label: tab-top1-by-country
+#| echo: true
+
+score_cols <- c("std_impact", "std_eff", "std_ppv", "std_missed", "std_delay")
+cutoff_val <- -1 ## selected cutoff value for std dimension scores based on sensitivity analysis above
+def_top1_by_country <- def_complete_country_dat %>%
+    rowwise() %>%
+    mutate(min_score = min(c_across(all_of(score_cols)), na.rm = TRUE)) %>%
+    ungroup() %>%
+    filter(min_score >= cutoff_val) %>%
+    group_by(country) %>%
+    arrange(desc(util_score)) %>%
+    slice_head(n = 1) %>%
+    ungroup()
+
+
+reactable_template(dplyr::select(def_top1_by_country, -contains("std_")),
+                  col_names = list(alert_type = reactable::colDef(name = "Alert Type"),
+                                  country = reactable::colDef(name = "Country"),
+                                  alert_lab = reactable::colDef(name = "Alert Def"),
+                                  util_score = reactable::colDef(name = "Util Score", defaultSortOrder = "desc")))
+
+```
+
+```{r, out.width='100%'}
+#| label: top4-by-country
+#| echo: true
+
+score_cols <- c("std_impact", "std_eff", "std_ppv", "std_missed", "std_delay")
+cutoff_val <- -1 ## selected cutoff value for std dimension scores based on sensitivity analysis 
+def_top4_by_country <- def_complete_country_dat %>%
+    filter(!is.na(util_score) & !is.nan(util_score)) %>%
+    rowwise() %>%
+    mutate(min_score = min(c_across(all_of(score_cols)), na.rm = TRUE)) %>%
+    ungroup() %>%
+    filter(min_score >= cutoff_val) %>%
+    group_by(country) %>%
+    arrange(desc(util_score)) %>%
+    slice_head(n = 4) %>%
+    ungroup()
+
+
+reactable_template(dplyr::select(def_top4_by_country, -contains("std_")),
+                  col_names = list(alert_type = reactable::colDef(name = "Alert Type"),
+                                  country = reactable::colDef(name = "Country"),
+                                  alert_lab = reactable::colDef(name = "Alert Def"),
+                                  util_score = reactable::colDef(name = "Util Score", defaultSortOrder = "desc")))
+
+alert_top4_freq <- def_top4_by_country %>%
+  count(alert_lab, name = "n_top4") %>%
+  arrange(desc(n_top4))
+
+ggplot(alert_top4_freq, aes(x = reorder(alert_lab, n_top4), y = n_top4)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Frequency of Alert Definitions Appearing in Top 4 Across Countries",
+    x = "Alert Definition",
+    y = "Count of Top-4 Appearances"
+  )
+
+```
+
+```{r}
+#| label: fig-country-cv-by-alertdef
+#| echo: true
+
+## calculate coefficient of variation (CV) accross countries by alert definition
+cv_by_alert <- def_complete_country_dat %>%
+  group_by(alert_lab) %>%
+  summarise(
+    mean_util = mean(util_score, na.rm = TRUE),
+    sd_util = sd(util_score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(cv_util = ifelse(mean_util != 0, sd_util / mean_util, NA_real_)) %>%
+  filter(!is.na(cv_util))
+
+## dot plot of cv
+ggplot(cv_by_alert, aes(x = alert_lab, y = cv_util)) +
+  geom_point(size = 3, color = "steelblue") +
+  theme_minimal() +
+  labs(
+    title = "Coefficient of Variation of Utility Score by Alert Definition Across Countries",
+    x = "Alert Definition",
+    y = "Coefficient of Variation"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+## dot plot of sd
+ggplot(cv_by_alert, aes(x = alert_lab, y = sd_util)) +
+  geom_point(size = 3, color = "steelblue") +
+  theme_minimal() +
+  labs(
+    title = "Standard Deviation of Utility Score by Alert Definition Across Countries",
+    x = "Alert Definition",
+    y = "Standard Deviation"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+```
+
+
+```{r}
+#| label: fig4-multipanel
+#| fig-height: 9
+#| fig-width: 7
+#| eval: false
+
+library(tidytext)
+library(ggspatial)
+
+score_cols <- c("std_impact","std_eff","std_ppv","std_missed","std_delay")
+cutoff_val <- -1
+
+filtered_dat <- def_complete_country_dat %>%
+  filter(!is.na(util_score) & !is.nan(util_score)) %>%
+  rowwise() %>%
+  mutate(min_score = min(c_across(all_of(score_cols)), na.rm = TRUE)) %>%
+  ungroup() %>%
+  filter(min_score >= cutoff_val)
+
+plot_base_dat <- def_complete_country_dat %>%
+  filter(!is.na(util_score) & !is.nan(util_score)) %>%
+  rowwise() %>%
+  mutate(
+    min_score = min(c_across(all_of(score_cols)), na.rm = TRUE),
+    passes_cutoff = min_score >= cutoff_val
+  ) %>%
+  ungroup()
+
+plot_top_alerts <- function(data, n = 3, color_var = c("alert_type","region")) {
+
+  color_var <- match.arg(color_var)
+
+  africa_region_map <- tribble(
+    ~iso3, ~region,
+    "BEN","Western Africa","BFA","Western Africa","CPV","Western Africa",
+    "CIV","Western Africa","GMB","Western Africa","GHA","Western Africa",
+    "GIN","Western Africa","GNB","Western Africa","LBR","Western Africa",
+    "MLI","Western Africa","MRT","Western Africa","NER","Western Africa",
+    "NGA","Western Africa","SEN","Western Africa","SLE","Western Africa",
+    "TGO","Western Africa",
+    "AGO","Central Africa","CAF","Central Africa","CMR","Central Africa",
+    "COD","Central Africa","COG","Central Africa","GNQ","Central Africa",
+    "GAB","Central Africa","STP","Central Africa","TCD","Central Africa",
+    "BDI","Eastern Africa","COM","Eastern Africa","DJI","Eastern Africa",
+    "ERI","Eastern Africa","ETH","Eastern Africa","KEN","Eastern Africa",
+    "MDG","Eastern Africa","RWA","Eastern Africa","SOM","Eastern Africa",
+    "SSD","Eastern Africa","TZA","Eastern Africa","UGA","Eastern Africa",
+    "SDN","Eastern Africa",
+    "BWA","Southern Africa","LSO","Southern Africa","NAM","Southern Africa",
+    "ZAF","Southern Africa","SWZ","Southern Africa","MWI","Southern Africa",
+    "MOZ","Southern Africa","ZWE","Southern Africa","ZMB","Southern Africa"
+  )
+
+  data <- data %>%
+    rename(iso3 = country) %>%
+    left_join(africa_region_map, by = "iso3") %>%
+    rename(country = iso3) %>%
+    mutate(region = gsub(" ", "\n", region))
+
+  top_n <- data %>%
+    filter(passes_cutoff) %>%
+    group_by(country) %>%
+    arrange(desc(util_score)) %>%
+    mutate(rank_within_country = row_number()) %>%
+    slice_head(n = n) %>%
+    ungroup() %>%
+    mutate(is_top = TRUE) %>%
+    select(country, alert_lab, is_top, rank_within_country)
+
+  plot_dat <- data %>%
+  left_join(top_n, by = c("country","alert_lab")) %>%
+  mutate(
+    size_rank = ifelse(is_top, rank_within_country, NA_real_)  # NEW
+  )
+
+  region_colors <- c(
+    "Western\nAfrica"  = "#F4A676",
+    "Central\nAfrica"  = "#A7B545",
+    "Eastern\nAfrica"  = "#7C6A58",
+    "Southern\nAfrica" = "#003F50"
+  )
+
+  alert_type_colors <- c(
+    "trend"    = "#e74c3c",
+    "case"     = "#f1c40f",
+    "cum case" = "#1abc9c",
+    "rate"     = "#9b59b6"
+  )
+
+  color_scale <- if (color_var == "alert_type") {
+    scale_color_manual(values = alert_type_colors)
+  } else {
+    scale_color_manual(values = region_colors)
+  }
+
+  ggplot(plot_dat, aes(x = country, y = alert_lab)) +
+    geom_point(
+      aes(size = size_rank, color = !!sym(color_var)),
+      na.rm = TRUE, alpha = 0.85
+    ) +
+    facet_grid(alert_type ~ region, scales = "free", space = "free") +
+    scale_y_discrete(limits = function(x) unique(x)) +
+    scale_x_discrete(limits = function(x) unique(x)) +
+    color_scale +
+    scale_size(
+      range = c(6, 1.5),       
+      limits = c(n, 1),        ## reverse bubble size, higher rank is larger bubble
+      breaks = 1:n,
+      labels = paste("Rank", 1:n)
+    ) +
+    theme_minimal() +
+    labs(
+      x = "Country",
+      y = "Alert Definition",
+      size = "Rank (1 = highest utility)",  
+      color = ifelse(color_var == "region", "Region", "Alert Type")
+  ) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(face = "bold", size = 11),
+      legend.position = "none"
+    )
+}
+
+p_alerts <- plot_top_alerts(plot_base_dat, n = 3, color_var = "alert_type")
+
+## region mini map 
+colors_afro_regions <- c("#FFA378", "#A8B545", "#8C796D", "#024554")
+names(colors_afro_regions) <- c(
+  "Western Africa","Central Africa","Eastern Africa","Southern Africa"
+)
+
+africa_region_map <- tribble(
+  ~iso3, ~region,
+  "BEN","Western Africa","BFA","Western Africa","CPV","Western Africa",
+  "CIV","Western Africa","GMB","Western Africa","GHA","Western Africa",
+  "GIN","Western Africa","GNB","Western Africa","LBR","Western Africa",
+  "MLI","Western Africa","MRT","Western Africa","NER","Western Africa",
+  "NGA","Western Africa","SEN","Western Africa","SLE","Western Africa",
+  "TGO","Western Africa",
+  "AGO","Central Africa","CAF","Central Africa","CMR","Central Africa",
+  "COD","Central Africa","COG","Central Africa","GNQ","Central Africa",
+  "GAB","Central Africa","STP","Central Africa","TCD","Central Africa",
+  "BDI","Eastern Africa","COM","Eastern Africa","DJI","Eastern Africa",
+  "ERI","Eastern Africa","ETH","Eastern Africa","KEN","Eastern Africa",
+  "MDG","Eastern Africa","RWA","Eastern Africa","SOM","Eastern Africa",
+  "SSD","Eastern Africa","TZA","Eastern Africa","UGA","Eastern Africa",
+  "SDN","Eastern Africa",
+  "BWA","Southern Africa","LSO","Southern Africa","NAM","Southern Africa",
+  "ZAF","Southern Africa","SWZ","Southern Africa","MWI","Southern Africa",
+  "MOZ","Southern Africa","ZWE","Southern Africa","ZMB","Southern Africa"
+)
+
+africa_sf <- gisco_get_countries(region = "Africa", resolution = "3") %>%
+  left_join(africa_region_map, by = c("ISO3_CODE"="iso3")) %>%
+  filter(!is.na(region))
+
+p_map <- ggplot(africa_sf) +
+  geom_sf(aes(fill = region), color = "white", linewidth = 0.2) +
+  scale_fill_manual(values = colors_afro_regions) +
+  coord_sf(xlim = c(-20, 55), ylim = c(-35, 38), expand = FALSE) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(), axis.text = element_blank(),
+        axis.title = element_blank(), legend.position = "right")
+
+africa_sf_t1 <- gisco_get_countries(
+  region = "Africa",
+  resolution = "3"
+) %>%
+  filter(ISO3_CODE %in% def_top1_by_country$country)
+
+def_top1_valid <- def_top1_by_country %>%
+  filter(!is.na(util_score) & !is.nan(util_score))
+
+africa_alerts_sf <- africa_sf_t1 %>%
+  left_join(def_top1_valid, by = c("ISO3_CODE" = "country")) %>%
+  mutate(alert_stringency = factor(alert_stringency, ordered = TRUE))
+
+alert_type_colors <- c(
+  "trend"    = "#e74c3c",
+  "case"     = "#f1c40f",
+  "cum case" = "#1abc9c",
+  "rate"     = "#9b59b6"
+)
+
+p_alert_map <- ggplot(africa_alerts_sf) +
+  geom_sf(aes(fill = alert_type),
+          color = "grey40", linewidth = 0.2) +   # removed alpha
+  geom_sf_text(aes(label = ISO3_CODE), size = 2.5, color = "gray20") +
+  scale_fill_manual(values = alert_type_colors, na.value = "lightgray", name = "Alert Type") +
+  annotation_north_arrow(
+    location = "tr",                 
+    which_north = "true",
+    height = unit(1, "cm"),
+    width = unit(1, "cm"),
+    style = north_arrow_fancy_orienteering()
+  ) +
+  annotation_scale(
+    location = "bl",                
+    width_hint = 0.25,
+    text_cex = 0.8,                  
+    bar_cols = c("grey60","white")   
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.key.height = unit(0.3, "cm"),
+    legend.key.width = unit(0.3, "cm"),
+    legend.spacing.y = unit(0.05, "cm"),
+    legend.text = element_text(size = 7),
+    legend.title = element_text(size = 8),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank()
+  )
+
+
+plot_alert_frequency_by_region <- function(data, n = 3) {
+
+  africa_region_map <- africa_region_map
+
+  data <- data %>%
+    rename(iso3 = country) %>%
+    left_join(africa_region_map, by = "iso3") %>%
+    rename(country = iso3)
+
+  top_n <- data %>%
+    group_by(country) %>%
+    arrange(desc(util_score)) %>%
+    slice_head(n = n) %>%
+    ungroup()
+
+  alert_freq <- top_n %>%
+    count(alert_type, alert_lab, region, name = "count") %>%
+    group_by(alert_type, alert_lab) %>%
+    mutate(total = sum(count)) %>%
+    ungroup() %>%
+    mutate(alert_lab_ord = reorder_within(alert_lab, total, alert_type))
+
+  region_colors <- c(
+    "Western Africa"  = "#F4A676",
+    "Central Africa"  = "#A7B545",
+    "Eastern Africa"  = "#7C6A58",
+    "Southern Africa" = "#003F50"
+  )
+
+  ggplot(alert_freq, aes(x = alert_lab_ord, y = count, fill = region)) +
+    geom_col() +
+    coord_flip() +
+    facet_wrap(~ alert_type, scales = "free_y", ncol = 1) +
+    scale_x_reordered() +
+    scale_fill_manual(values = region_colors) +
+    theme_minimal() +
+    labs(
+      x = "",
+      y = "Count",
+      fill = "Region"
+    ) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      legend.position = "none"  
+    )
+}
+
+p_freq <- plot_alert_frequency_by_region(filtered_dat, n = 3)
+
+## top panel
+p_top <- plot_grid(
+  p_alerts, p_map,
+  ncol = 2,
+  rel_widths = c(0.7, 0.3),
+  labels = c("A", "B"),
+  label_size = 14
+)
+
+## bottom panel
+p_bottom <- plot_grid(
+  p_freq,
+  p_alert_map,
+  ncol = 2,
+  rel_widths = c(1, 1),
+  labels = c("C", "D"),
+  label_size = 14
+)
+
+p_map_nl <- p_map + theme(legend.position = "none")
+
+p_C_with_B <- ggdraw() +
+  draw_plot(p_freq, 0, 0, 1, 1) +   
+draw_plot(p_map_nl,
+          x = 0.75, y = 0.75,
+          width = 0.28, height = 0.28)
+
+p_top_row <- plot_grid(
+  p_alert_map,
+  p_C_with_B,
+  ncol = 2,
+  rel_widths = c(0.45, 0.55),
+  labels = c("A","B"),
+  label_size = 14
+)
+
+p_bottom_row <- plot_grid(
+  p_alerts,         # A
+  ncol = 1,
+  labels = "C",
+  label_size = 14
+)
+
+full_figure <- plot_grid(
+  p_top_row,
+  p_bottom_row,
+  ncol = 1,
+  rel_heights = c(1, 1.1)
+)
+
+ggsave(
+  paste0(fig_path,"/combined_reordered_figure.png"),
+  full_figure,
+  width = 13,
+  height = 11,
+  dpi = 300
+)
+
+print(full_figure)
+
+```
+
+
+```{r}
+#| label: fig4-singlepanel-version2
+
+score_cols <- c("std_impact","std_eff","std_ppv","std_missed","std_delay")
+cutoff_val <- -1
+
+plot_base_dat <- def_complete_country_dat %>%
+  filter(!is.na(util_score) & !is.nan(util_score)) %>%
+  rowwise() %>%
+  mutate(
+    min_score = min(c_across(all_of(score_cols)), na.rm = TRUE),
+    passes_cutoff = min_score >= cutoff_val
+  ) %>%
+  ungroup()
+
+africa_region_map <- tribble(
+  ~iso3, ~region,
+  "BEN","Western Africa","BFA","Western Africa","CPV","Western Africa",
+  "CIV","Western Africa","GMB","Western Africa","GHA","Western Africa",
+  "GIN","Western Africa","GNB","Western Africa","LBR","Western Africa",
+  "MLI","Western Africa","MRT","Western Africa","NER","Western Africa",
+  "NGA","Western Africa","SEN","Western Africa","SLE","Western Africa",
+  "TGO","Western Africa",
+  "AGO","Central Africa","CAF","Central Africa","CMR","Central Africa",
+  "COD","Central Africa","COG","Central Africa","GNQ","Central Africa",
+  "GAB","Central Africa","STP","Central Africa","TCD","Central Africa",
+  "BDI","Eastern Africa","COM","Eastern Africa","DJI","Eastern Africa",
+  "ERI","Eastern Africa","ETH","Eastern Africa","KEN","Eastern Africa",
+  "MDG","Eastern Africa","RWA","Eastern Africa","SOM","Eastern Africa",
+  "SSD","Eastern Africa","TZA","Eastern Africa","UGA","Eastern Africa",
+  "SDN","Eastern Africa",
+  "BWA","Southern Africa","LSO","Southern Africa","NAM","Southern Africa",
+  "ZAF","Southern Africa","SWZ","Southern Africa","MWI","Southern Africa",
+  "MOZ","Southern Africa","ZWE","Southern Africa","ZMB","Southern Africa"
+)
+
+plot_top_alerts <- function(data, n = 3, color_var = c("region","alert_type")) {
+
+  color_var <- match.arg(color_var)
+
+  data <- data %>%
+    rename(iso3 = country) %>%
+    left_join(africa_region_map, by = "iso3") %>%
+    rename(country = iso3) %>%
+    mutate(region = gsub(" ", "\n", region))
+
+  top_n <- data %>%
+    filter(passes_cutoff) %>%
+    group_by(country) %>%
+    arrange(desc(util_score)) %>%
+    mutate(rank_within_country = row_number()) %>%
+    slice_head(n = n) %>%
+    ungroup() %>%
+    mutate(is_top = TRUE) %>%
+    select(country, alert_lab, is_top, rank_within_country)
+
+  plot_dat <- data %>%
+    left_join(top_n, by = c("country","alert_lab")) %>%
+    mutate(size_rank = ifelse(is_top, rank_within_country, NA_real_))
+
+  region_colors <- c(
+    "Western\nAfrica"  = "#F4A676",
+    "Central\nAfrica"  = "#A7B545",
+    "Eastern\nAfrica"  = "#7C6A58",
+    "Southern\nAfrica" = "#003F50"
+  )
+
+  alert_type_colors <- c(
+    "trend"    = "#e74c3c",
+    "case"     = "#f1c40f",
+    "cum case" = "#1abc9c",
+    "rate"     = "#9b59b6"
+  )
+
+  color_scale <- if (color_var == "region") {
+    scale_color_manual(values = region_colors)
+  } else {
+    scale_color_manual(values = alert_type_colors)
+  }
+
+  ggplot(plot_dat, aes(x = country, y = alert_lab)) +
+    geom_point(
+      aes(size = size_rank, color = .data[[color_var]]),
+      na.rm = TRUE,
+      alpha = 0.85
+    ) +
+    facet_grid(alert_type ~ region, scales = "free", space = "free") +
+    color_scale +
+    scale_size(
+      range = c(6, 1.5),
+      limits = c(n, 1),
+      breaks = 1:n,
+      labels = paste("Rank", 1:n)
+    ) +
+    theme_minimal() +
+    labs(
+      x = "Country",
+      y = "Alert Definition",
+      size = "Rank (1 = highest utility)",
+      color = ifelse(color_var == "region","Region","Alert Type")
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(face = "bold", size = 11),
+      legend.position = "none"
+    )
+}
+
+p_alerts <- plot_top_alerts(plot_base_dat, n = 3, color_var = "region")
+
+colors_afro_regions <- c(
+  "Western Africa"  = "#F4A676",
+  "Central Africa"  = "#A7B545",
+  "Eastern Africa"  = "#7C6A58",
+  "Southern Africa" = "#003F50"
+)
+
+africa_sf <- gisco_get_countries(region = "Africa", resolution = "3") %>%
+  left_join(africa_region_map, by = c("ISO3_CODE"="iso3")) %>%
+  filter(!is.na(region))
+
+p_map <- ggplot(africa_sf) +
+  geom_sf(aes(fill = region), color = "white", linewidth = 0.2) +
+  scale_fill_manual(values = colors_afro_regions) +
+  coord_sf(xlim = c(-20, 55), ylim = c(-35, 38), expand = FALSE) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(10, 10, 10, 0),
+    panel.border = element_rect(color = "grey80", fill = NA)
+  )
+
+p_final <- plot_grid(
+  p_alerts,
+  p_map,
+  ncol = 2,
+  rel_widths = c(0.86, 0.14)
+)
+
+ggsave(
+  paste0(fig_path, "/bubble_alert_plot_",ocv_status,".png"),
+  p_final,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+print(p_final)
+
+```
+
+```{r}
+#| label: fig4-singlepanel-coauthor
+
+score_cols <- c("std_impact","std_eff","std_ppv","std_missed","std_delay")
+cutoff_val <- -1
+
+plot_base_dat <- def_complete_country_dat %>%
+  filter(!is.na(util_score) & !is.nan(util_score)) %>%
+  rowwise() %>%
+  mutate(
+    min_score = min(c_across(all_of(score_cols)), na.rm = TRUE),
+    passes_cutoff = min_score >= cutoff_val
+  ) %>%
+  ungroup()
+
+africa_region_map <- tribble(
+  ~iso3, ~region,
+  "BEN","Western Africa","BFA","Western Africa","CPV","Western Africa",
+  "CIV","Western Africa","GMB","Western Africa","GHA","Western Africa",
+  "GIN","Western Africa","GNB","Western Africa","LBR","Western Africa",
+  "MLI","Western Africa","MRT","Western Africa","NER","Western Africa",
+  "NGA","Western Africa","SEN","Western Africa","SLE","Western Africa",
+  "TGO","Western Africa",
+  "AGO","Central Africa","CAF","Central Africa","CMR","Central Africa",
+  "COD","Central Africa","COG","Central Africa","GNQ","Central Africa",
+  "GAB","Central Africa","STP","Central Africa","TCD","Central Africa",
+  "BDI","Eastern Africa","COM","Eastern Africa","DJI","Eastern Africa",
+  "ERI","Eastern Africa","ETH","Eastern Africa","KEN","Eastern Africa",
+  "MDG","Eastern Africa","RWA","Eastern Africa","SOM","Eastern Africa",
+  "SSD","Eastern Africa","TZA","Eastern Africa","UGA","Eastern Africa",
+  "SDN","Eastern Africa",
+  "BWA","Southern Africa","LSO","Southern Africa","NAM","Southern Africa",
+  "ZAF","Southern Africa","SWZ","Southern Africa","MWI","Southern Africa",
+  "MOZ","Southern Africa","ZWE","Southern Africa","ZMB","Southern Africa"
+)
+
+plot_top_alerts <- function(data, n = 3, color_var = c("region", "alert_type")) {
+
+  color_var <- match.arg(color_var)
+
+  data <- data %>%
+    rename(iso3 = country) %>%
+    left_join(africa_region_map, by = "iso3") %>%
+    rename(country = iso3) %>%
+    mutate(region = gsub(" ", "\n", region))
+
+  top_n <- data %>%
+    filter(passes_cutoff) %>%
+    group_by(country) %>%
+    arrange(desc(util_score)) %>%
+    mutate(rank_within_country = row_number()) %>%
+    slice_head(n = n) %>%
+    ungroup() %>%
+    mutate(is_top = TRUE) %>%
+    select(country, alert_lab, is_top, rank_within_country)
+
+  plot_dat <- data %>%
+    left_join(top_n, by = c("country", "alert_lab")) %>%
+    mutate(size_rank = ifelse(is_top, rank_within_country, NA_real_))
+
+  region_colors <- c(
+    "Western\nAfrica"  = "#F4A676",
+    "Central\nAfrica"  = "#A7B545",
+    "Eastern\nAfrica"  = "#7C6A58",
+    "Southern\nAfrica" = "#003F50"
+  )
+
+  alert_type_colors <- c(
+    "trend"    = "#e74c3c",
+    "case"     = "#f1c40f",
+    "cum case" = "#1abc9c",
+    "rate"     = "#9b59b6"
+  )
+
+  color_scale <- if (color_var == "region") {
+    scale_color_manual(values = region_colors)
+  } else {
+    scale_color_manual(values = alert_type_colors)
+  }
+
+  ggplot(plot_dat, aes(x = country, y = alert_lab)) +
+    geom_point(
+      aes(size = size_rank, color = .data[[color_var]]),
+      na.rm = TRUE,
+      alpha = 0.85
+    ) +
+    facet_grid(alert_type ~ region, scales = "free", space = "free") +
+    color_scale +
+    scale_size(
+      range  = c(6, 1.5),
+      limits = c(n, 1),
+      breaks = 1:n,
+      labels = paste("Rank", 1:n)
+    ) +
+    theme_minimal() +
+    labs(
+      x     = "Country",
+      y     = "Alert Definition",
+      size  = "Rank (1 = highest utility)",
+      color = ifelse(color_var == "region", "Region", "Alert Type")
+    ) +
+    theme(
+      axis.text.x     = element_text(angle = 45, hjust = 1),
+      strip.text      = element_text(face = "bold", size = 11),
+      legend.position = "none"
+    )
+}
+
+p_alerts <- plot_top_alerts(plot_base_dat, n = 3, color_var = "region")
+
+## Histogram
+hist_dat <- plot_base_dat %>%
+  rename(iso3 = country) %>%
+  left_join(africa_region_map, by = "iso3") %>%
+  rename(country = iso3) %>%
+  filter(passes_cutoff) %>%
+  group_by(country) %>%
+  arrange(desc(util_score)) %>%
+  mutate(rank_within_country = row_number()) %>%
+  slice_head(n = 3) %>%
+  ungroup() %>%
+  count(alert_lab, alert_type, name = "n_top") %>%
+  right_join(
+    plot_base_dat %>% distinct(alert_lab, alert_type),
+    by = c("alert_lab", "alert_type")
+  ) %>%
+  mutate(n_top = replace_na(n_top, 0))
+
+p_hist <- ggplot(hist_dat, aes(x = n_top, y = alert_lab)) +
+  geom_col(fill = "grey60", width = 0.6) +
+  facet_grid(rows = vars(alert_type), scales = "free_y", space = "free_y") +
+  scale_x_continuous(
+    breaks = scales::breaks_width(2),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  theme_minimal() +
+  labs(x = "No. countries\n(top 3)", y = NULL) +
+  theme(
+    axis.text.y        = element_blank(),
+    axis.ticks.y       = element_blank(),
+    strip.text.y       = element_blank(),
+    strip.text.x       = element_blank(),
+    panel.grid.major.y = element_blank(),
+    legend.position    = "none"
+  )
+
+## Map
+colors_afro_regions <- c(
+  "Western Africa"  = "#F4A676",
+  "Central Africa"  = "#A7B545",
+  "Eastern Africa"  = "#7C6A58",
+  "Southern Africa" = "#003F50"
+)
+
+africa_sf <- gisco_get_countries(region = "Africa", resolution = "3") %>%
+  left_join(africa_region_map, by = c("ISO3_CODE" = "iso3")) %>%
+  filter(!is.na(region))
+
+p_map <- ggplot(africa_sf) +
+  geom_sf(aes(fill = region), color = "white", linewidth = 0.2) +
+  scale_fill_manual(values = colors_afro_regions) +
+  coord_sf(xlim = c(-20, 55), ylim = c(-35, 38), expand = FALSE) +
+  theme_minimal() +
+  theme(
+    panel.grid    = element_blank(),
+    axis.text     = element_blank(),
+    axis.title    = element_blank(),
+    legend.position = "none",
+    plot.margin   = margin(10, 10, 10, 0),
+    panel.border  = element_rect(color = "grey80", fill = NA)
+  )
+
+## Size legend — extracted from a temporary version of p_alerts
+p_legend <- cowplot::get_legend(
+  plot_top_alerts(plot_base_dat, n = 3, color_var = "region") +
+    ## show only the size legend, suppress the colour legend
+    guides(color = "none") +
+    theme(
+      legend.position     = "right",
+      legend.title        = element_text(size = 9),
+      legend.text         = element_text(size = 8),
+      legend.key.size     = unit(0.5, "cm"),
+      legend.background   = element_blank()
+    )
+)
+
+## Right column: map stacked above size legend
+p_right <- plot_grid(
+  p_map,
+  p_legend,
+  ncol        = 1,
+  rel_heights = c(0.55, 0.45)
+)
+
+p_final <- plot_grid(
+  p_alerts,
+  p_hist,
+  p_right,
+  ncol       = 3,
+  rel_widths = c(0.76, 0.10, 0.14),
+  align      = "h",
+  axis       = "tb"
+)
+
+ggsave(
+  paste0(fig_path, "/bubble_alert_plot_", ocv_status, ".png"),
+  p_final,
+  width  = 12,
+  height = 8,
+  dpi    = 300
+)
+
+print(p_final)
+
+```
+
+```{r}
+#| label: fig4-singlepanel
+
+score_cols <- c("std_impact","std_eff","std_ppv","std_missed","std_delay")
+cutoff_val <- -1
+
+plot_base_dat <- def_complete_country_dat %>%
+  filter(!is.na(util_score) & !is.nan(util_score)) %>%
+  rowwise() %>%
+  mutate(
+    min_score = min(c_across(all_of(score_cols)), na.rm = TRUE),
+    passes_cutoff = min_score >= cutoff_val
+  ) %>%
+  ungroup()
+
+africa_region_map <- tribble(
+  ~iso3, ~region,
+  "BEN","Western Africa","BFA","Western Africa","CPV","Western Africa",
+  "CIV","Western Africa","GMB","Western Africa","GHA","Western Africa",
+  "GIN","Western Africa","GNB","Western Africa","LBR","Western Africa",
+  "MLI","Western Africa","MRT","Western Africa","NER","Western Africa",
+  "NGA","Western Africa","SEN","Western Africa","SLE","Western Africa",
+  "TGO","Western Africa",
+  "AGO","Central Africa","CAF","Central Africa","CMR","Central Africa",
+  "COD","Central Africa","COG","Central Africa","GNQ","Central Africa",
+  "GAB","Central Africa","STP","Central Africa","TCD","Central Africa",
+  "BDI","Eastern Africa","COM","Eastern Africa","DJI","Eastern Africa",
+  "ERI","Eastern Africa","ETH","Eastern Africa","KEN","Eastern Africa",
+  "MDG","Eastern Africa","RWA","Eastern Africa","SOM","Eastern Africa",
+  "SSD","Eastern Africa","TZA","Eastern Africa","UGA","Eastern Africa",
+  "SDN","Eastern Africa",
+  "BWA","Southern Africa","LSO","Southern Africa","NAM","Southern Africa",
+  "ZAF","Southern Africa","SWZ","Southern Africa","MWI","Southern Africa",
+  "MOZ","Southern Africa","ZWE","Southern Africa","ZMB","Southern Africa"
+)
+
+plot_top_alerts <- function(data, n = 3) {
+
+  data <- data %>%
+    rename(iso3 = country) %>%
+    left_join(africa_region_map, by = "iso3") %>%
+    rename(country = iso3) %>%
+    mutate(region = gsub(" ", "\n", region))
+
+  top_n <- data %>%
+    filter(passes_cutoff) %>%
+    group_by(country) %>%
+    arrange(desc(util_score)) %>%
+    mutate(rank_within_country = row_number()) %>%
+    slice_head(n = n) %>%
+    ungroup() %>%
+    mutate(is_top = TRUE) %>%
+    select(country, alert_lab, is_top, rank_within_country)
+
+  plot_dat <- data %>%
+    left_join(top_n, by = c("country","alert_lab")) %>%
+    mutate(size_rank = ifelse(is_top, rank_within_country, NA_real_))
+
+  alert_type_colors <- c(
+    "trend"    = "#e74c3c",
+    "case"     = "#f1c40f",
+    "cum case" = "#1abc9c",
+    "rate"     = "#9b59b6"
+  )
+
+  ggplot(plot_dat, aes(x = country, y = alert_lab)) +
+    geom_point(
+      aes(size = size_rank, color = alert_type),
+      na.rm = TRUE,
+      alpha = 0.85
+    ) +
+    facet_grid(alert_type ~ region, scales = "free", space = "free") +
+    scale_color_manual(values = alert_type_colors) +
+    scale_size(
+      range = c(6, 1.5),
+      limits = c(n, 1),
+      breaks = 1:n,
+      labels = paste("Rank", 1:n)
+    ) +
+    theme_minimal() +
+    labs(
+      x = "Country",
+      y = "Alert Definition",
+      size = "Rank (1 = highest utility)",
+      color = "Alert Type"
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(face = "bold", size = 11),
+      legend.position = "none"
+    )
+}
+
+p_alerts <- plot_top_alerts(plot_base_dat, n = 3)
+
+ggsave(
+  paste0(fig_path, "/bubble_alert_plot.png"),
+  p_alerts,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+print(p_alerts)
+
+```
+
+
+
+```{r}
+#| label: country-strat-utility-other-popgroups
+prep_country_utility_data <- function(pop_group){
+
+means_impact_eff_country_dat <- prep_impact_eff_dat %>%
+  dplyr::filter(pop_brk == pop_group) %>%
+  dplyr::group_by(alert_number, alert_type, country) %>%
+  dplyr::summarise(
+    impact_mean = mean(impact),
+    eff_mean = mean(eff),
+    .groups = "drop"
+  )
+
+means_delay_country_dat <- prep_missed_delay_dat %>%
+  dplyr::filter(pop_brk == pop_group) %>%
+  dplyr::group_by(alert_number, alert_type, country) %>%
+  dplyr::summarise(
+    delay_mean = mean(delay, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+n_country_outbreaks <- linked_cl_large %>%
+  dplyr::filter(pop_brk == pop_group) %>%
+  dplyr::distinct(outbreak_UID, country) %>%
+  dplyr::group_by(country) %>%
+  dplyr::summarise(n_outbreaks = n(), .groups = "drop")
+
+fig_impact_country_dat <- dplyr::group_by(
+  prep_impact_eff_dat %>% dplyr::filter(pop_brk == pop_group),
+  alert_number, alert_type, country
+) %>%
+  dplyr::reframe(quibble2(impact)) %>%
+  tidyr::pivot_wider(
+    names_from = impact_q,
+    names_glue = "{.value}_{impact_q}",
+    values_from = impact
+  ) %>%
+  dplyr::full_join(
+    dplyr::select(means_impact_eff_country_dat,
+                  alert_number, alert_type, country, impact_mean),
+    by = c("alert_number","alert_type","country")
+  ) %>%
+  prepare_fig_dat()
+
+fig_eff_country_dat <- dplyr::group_by(
+  prep_impact_eff_dat %>% dplyr::filter(pop_brk == pop_group),
+  alert_number, alert_type, country
+) %>%
+  dplyr::reframe(quibble2(eff)) %>%
+  tidyr::pivot_wider(
+    names_from = eff_q,
+    names_glue = "{.value}_{eff_q}",
+    values_from = eff
+  ) %>%
+  dplyr::full_join(
+    dplyr::select(means_impact_eff_country_dat,
+                  alert_number, alert_type, country, eff_mean),
+    by = c("alert_number","alert_type","country")
+  ) %>%
+  prepare_fig_dat()
+
+fig_ppv_country_dat <- dplyr::group_by(
+  prep_ppv_dat %>% dplyr::filter(pop_brk == pop_group),
+  alert_number, alert_type, country
+) %>%
+  dplyr::summarise(
+    alerts = n(),
+    true_positives = sum(true_positives),
+    ppv = round(true_positives/alerts, 2),
+    .groups = "drop"
+  ) %>%
+  prepare_fig_dat()
+
+fig_missed_country_dat <- dplyr::group_by(
+  prep_missed_delay_dat %>% dplyr::filter(pop_brk == pop_group),
+  alert_number, alert_type, country
+) %>%
+  dplyr::summarise(
+    n_detected = sum(is_triggered),
+    .groups = "drop"
+  ) %>%
+  dplyr::left_join(n_country_outbreaks, by = "country") %>%
+  dplyr::mutate(
+    n_missed = n_outbreaks - n_detected,
+    missed_prop = n_missed / n_outbreaks
+  ) %>%
+  prepare_fig_dat()
+
+fig_delay_country_dat <- dplyr::group_by(
+  prep_missed_delay_dat %>% dplyr::filter(pop_brk == pop_group),
+  alert_number, alert_type, country
+) %>%
+  dplyr::reframe(quibble2(delay)) %>%
+  dplyr::ungroup() %>%
+  tidyr::pivot_wider(
+    names_from = delay_q,
+    names_glue = "{.value}_{delay_q}",
+    values_from = delay
+  ) %>%
+  dplyr::full_join(
+    means_delay_country_dat,
+    by = c("alert_number","alert_type","country")
+  ) %>%
+  prepare_fig_dat()
+
+fig_complete_country_dat <- dplyr::full_join(
+  fig_impact_country_dat, fig_eff_country_dat,
+  by = c("alert_number","alert_type","country","alert_lab")
+) %>%
+  dplyr::full_join(fig_ppv_country_dat,
+                   by = c("alert_number","alert_type","country","alert_lab")) %>%
+  dplyr::full_join(fig_missed_country_dat,
+                   by = c("alert_number","alert_type","country","alert_lab")) %>%
+  dplyr::full_join(fig_delay_country_dat,
+                   by = c("alert_number","alert_type","country","alert_lab"))
+
+def_complete_country_dat <- fig_complete_country_dat %>%
+  dplyr::group_by(country) %>%
+  dplyr::mutate(
+    std_impact = as.vector(scale(impact_mean)),
+    std_eff = as.vector(scale(eff_mean)),
+    std_ppv = as.vector(scale(ppv)),
+    std_missed = as.vector(scale(missed_prop)) * -1,
+    std_delay = as.vector(scale(delay_mean)) * -1
+  ) %>%
+  dplyr::ungroup() %>%
+  OutbreakExtractR::add_alert_stringency() %>%
+  dplyr::select(
+    country, alert_lab, alert_type, alert_stringency,
+    impact_mean, eff_mean, ppv, missed_prop, delay_mean,
+    std_impact, std_eff, std_ppv, std_missed, std_delay
+  ) %>%
+  dplyr::mutate(
+    dplyr::across(impact_mean:delay_mean, ~round(.x,1)),
+    dplyr::across(dplyr::contains("std_"), ~round(.x,1))
+  ) %>%
+  dplyr::mutate(
+    util_score = rowSums(dplyr::across(dplyr::contains("std_")))
+  ) %>%
+  dplyr::arrange(desc(util_score))
+
+  ## save to file to generate manuscript figures in dedicated script
+  clean_pop_group <- gsub("[^A-Za-z0-9]", "_", pop_group)
+  readr::write_csv(def_complete_country_dat, paste0("country_utility_", clean_pop_group, ".csv"))
+
+return(def_complete_country_dat)
+
+}
+
+## use function on all pop groups
+pop_groups <- unique(prep_impact_eff_dat$pop_brk)
+
+country_pop_results <- purrr::map(pop_groups, prep_country_utility_data)
+
+names(country_pop_results) <- pop_groups
+
+## get top x functions
+get_top_alerts_by_country <- function(dat, n_top = 1, cutoff_val = -1){
+
+score_cols <- c("std_impact","std_eff","std_ppv","std_missed","std_delay")
+
+dat %>%
+  dplyr::filter(!is.na(util_score) & !is.nan(util_score)) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    min_score = min(dplyr::c_across(dplyr::all_of(score_cols)), na.rm = TRUE)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(min_score >= cutoff_val) %>%
+  dplyr::group_by(country) %>%
+  dplyr::arrange(desc(util_score)) %>%
+  dplyr::slice_head(n = n_top) %>%
+  dplyr::ungroup()
+
+}
+
+top3_results <- purrr::map(
+  country_pop_results,
+  ~ get_top_alerts_by_country(.x, n_top = 3)
+)
+
+top3_freq_by_pop <- purrr::imap_dfr(
+  top3_results,           # list of Top-1 results per pop group
+  ~ .x %>%
+      count(alert_lab, name = "n_countries") %>%  ## count how many countries
+      mutate(pop_brk = .y)                        ## add population group
+)
+
+top3_freq_by_pop <- top3_freq_by_pop %>%
+  group_by(pop_brk) %>%
+  arrange(desc(n_countries), .by_group = TRUE) %>%
+  ungroup
+
+readr::write_csv(top3_freq_by_pop, paste0(fig_path,"/country_utility_top3_ncountries","_", ocv_status,".csv"))
+
+ggplot(top3_freq_by_pop,
+       aes(x = reorder(alert_lab, n_countries), y = n_countries, fill = pop_brk)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~pop_brk, scales = "free_y") +
+  coord_flip() +
+  theme_minimal() +
+  labs(
+    title = "Number of countries each alert Was Top-1 by population group",
+    x = "Alert Definition",
+    y = "Number of Countries"
+  )
+
+```
+
+# Supplement Methods - General
+
+## Unique population group distribution by admin scale
+
+filter_ms_data is applied. Locations will only be double-counted if they switch population groups across years
+
+```{r}
+#| label: fig-pop-distr-supp
+#| fig.width: 4.75
+#| fig.height: 3.5
+#| echo: true
+
+## total subnational locations in pre_extract
+total_subnat_locations <- pre_extract %>%
+  dplyr::filter(stringr::str_count(location, "::") > 1) %>%
+  dplyr::distinct(location) %>%
+  nrow()
+
+## collapse time dimension but allow population changes
+outbreak_locs <- pre_extract %>%
+  filter_ms_data(which_setting = which_setting) %>% ## filter out country and endemic locations
+  dplyr::distinct(location, pop_brk, spatial_scale)
+
+## subnational locations that appear in your final analysis dataset (fig denominator)
+included_subnat_locations <- outbreak_locs %>%
+  dplyr::distinct(location) %>%
+  nrow()
+
+## proportion
+pct_included_subnat <- round(
+  100 * included_subnat_locations / total_subnat_locations,
+  1
+)
+
+coverage_text <- glue::glue(
+  "In total, {total_subnat_locations} subnational locations were available. ",
+  "Of these, {included_subnat_locations} ({pct_included_subnat}%) ",
+  "are included in this analysis."
+)
+
+coverage_text
+
+## population groups
+
+## collapse time dimension but allow population changes
+ pre_pops <- pre_extract %>%
+   dplyr::distinct(location, pop_brk, spatial_scale)
+
+fig_pops <- pre_pops %>%
+  filter_ms_data(which_setting = which_setting) %>% ## filter out country and endemic locations
+  dplyr::count(pop_brk, spatial_scale)
+
+## plot
+ggplot(fig_pops, aes(x = pop_brk, y = n)) +
+  geom_col(aes(fill = spatial_scale)) +
+  scale_x_discrete("Population") +
+  scale_y_continuous("Locations") +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    axis.text = element_text(size = 12)
+  )
+
+knitr::kable(fig_pops)
+
+## totals by population bracket
+summary_df <- fig_pops %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::summarise(n = sum(n), .groups = "drop")
+
+total_n <- sum(summary_df$n)
+
+n_lt50   <- summary_df %>% dplyr::filter(pop_brk == "<50k") %>% dplyr::pull(n)
+n_50_500 <- summary_df %>% dplyr::filter(pop_brk == "[50k, 500k)") %>% dplyr::pull(n)
+n_gt500  <- summary_df %>% dplyr::filter(pop_brk == "≥ 500k") %>% dplyr::pull(n)
+
+p_lt50   <- round(100 * n_lt50 / total_n, 1)
+p_50_500 <- round(100 * n_50_500 / total_n, 1)
+p_gt500  <- round(100 * n_gt500 / total_n, 1)
+
+text_out <- glue::glue(
+  "{total_n} location-population combinations were included. ",
+  "{n_lt50} ({p_lt50}%) had a population less than 50,000, ",
+  "{n_50_500} ({p_50_500}%) had a population between 50,000 and 500,000, ",
+  "and {n_gt500} ({p_gt500}%) had a population over 500,000 ",
+  "(Supp Fig - Population distribution plot)."
+)
+
+text_out
+
+```
+
+# Presentations Only
+
+Prepare population distribution figure, cleaned just for presentations
+
+```{r}
+#| label: fig-pop-distr-prez
+#| fig.width: 4.75
+#| fig.height: 3.5
+
+pre_pops <- dplyr::distinct(pre_extract, location, spatial_scale, pop_brk)
+
+# checks
+pre_pops %>% dplyr::group_by(location, pop_brk) %>% count() %>% filter(n>1)
+
+fig_pops <- pre_pops %>%
+  dplyr::group_by(pop_brk, spatial_scale) %>%
+  dplyr::count() %>%
+  dplyr::filter(!grepl("composite", spatial_scale)) ## remove composite locations just for a clean figure
+
+ggplot(fig_pops, aes(x = pop_brk, y = n)) +
+  geom_col(aes(fill = spatial_scale)) +
+  scale_x_discrete("Population") +
+  scale_y_continuous("Locations") +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.title = element_blank(), axis.text = element_text(size=12))
+
+
+```
+
+# Proportion of alerts in the countries where the 50 weekly alert performs the best
+
+```{r}
+top1_countries <- c("COD", "ETH", "KEN", "TZA", "MWI")
+alerts_subnational <- alerts %>% filter(spatial_scale != "country")
+alerts_top1_countries <- alerts_subnational %>% filter(country %in% top1_countries)
+proportion <- nrow(alerts_top1_countries)/nrow(alerts_subnational)
+
+```
+
+The countries where 50 weekly is the top-performing alert are: `r top1_countries`, and account for `r nrow(alerts_top1_countries)` out of 
+`r nrow(alerts_subnational)` subnational alerts, representing 
+`r round(proportion * 100, 1)`% of all subnational alerts.
+
+# Country-level denominators for the top-3 heatmap (Fig 4)
+
+In the country-stratified panel of the alert heatmap, each cell counts the number of
+countries in which an alert definition ranked in the top three by utility score. The
+appropriate denominator is defined **per alert definition**: a country can only rank a
+definition it can score, and a complete utility score requires all five dimensions
+(impact, efficiency, PPV, missed proportion, delay). The missed and delay dimensions in
+turn require at least one recorded outbreak in the country's administrative units of that
+population size, so a country may trigger a definition (raise at least one alert) without
+being able to rank it. The number of rankable countries is therefore typically smaller
+than the number of countries where a definition triggered, and it varies by definition
+(stringent thresholds are rankable in fewer countries).
+
+The chunk below computes, per population band and per alert definition:
+
+- `n_countries_top3`: countries where the definition ranked in the top three (numerator)
+- `n_countries_rankable`: countries with a complete utility score for the definition (the denominator)
+- `n_countries_triggered`: countries where the definition triggered at least one alert
+
+It also reports band-level maxima used in the figure caption.
+
+```{r}
+#| label: tbl-country-denominators
+
+## "triggered" = definition raised >=1 alert in the country (ppv computable)
+## "rankable"  = definition has a complete utility score (all 5 dimensions present)
+
+## ---- per band, per definition ----
+denom_by_def <- purrr::imap_dfr(
+  country_pop_results,
+  ~ .x %>%
+      dplyr::group_by(alert_lab) %>%
+      dplyr::summarise(
+        n_countries_triggered = dplyr::n_distinct(country[!is.na(ppv)]),
+        n_countries_rankable  = dplyr::n_distinct(
+          country[!is.na(util_score) & !is.nan(util_score)]
+        ),
+        .groups = "drop"
+      ) %>%
+      dplyr::mutate(pop_brk = .y)
+) %>%
+  ## bring in the top-3 counts already computed for the figure
+  dplyr::left_join(
+    top3_freq_by_pop %>%
+      dplyr::select(pop_brk, alert_lab, n_countries_top3 = n_countries),
+    by = c("pop_brk", "alert_lab")
+  ) %>%
+  dplyr::mutate(n_countries_top3 = tidyr::replace_na(n_countries_top3, 0L)) %>%
+  dplyr::select(
+    pop_brk, alert_lab,
+    n_countries_top3, n_countries_rankable, n_countries_triggered
+  ) %>%
+  dplyr::arrange(pop_brk, dplyr::desc(n_countries_triggered))
+
+readr::write_csv(
+  denom_by_def,
+  paste0(fig_path, "/country_denominators_by_definition_", ocv_status, ".csv")
+)
+
+## ---- band-level summary (distinct countries + per-definition maxima) ----
+denom_by_band <- purrr::imap_dfr(
+  country_pop_results,
+  ~ tibble::tibble(
+      pop_brk               = .y,
+      n_countries_with_data = dplyr::n_distinct(.x$country),
+      n_countries_triggered = dplyr::n_distinct(.x$country[!is.na(.x$ppv)]),
+      n_countries_rankable  = dplyr::n_distinct(
+        .x$country[!is.na(.x$util_score) & !is.nan(.x$util_score)]
+      )
+    )
+) %>%
+  dplyr::left_join(
+    denom_by_def %>%
+      dplyr::group_by(pop_brk) %>%
+      dplyr::summarise(
+        max_triggered_any_def = max(n_countries_triggered),
+        max_rankable_any_def  = max(n_countries_rankable),
+        .groups = "drop"
+      ),
+    by = "pop_brk"
+  )
+
+readr::write_csv(
+  denom_by_band,
+  paste0(fig_path, "/country_denominators_by_band_", ocv_status, ".csv")
+)
+
+knitr::kable(
+  denom_by_band,
+  caption = "Country denominators per population band (Fig 4 country-stratified panel)"
+)
+```
+
+Per-definition detail (numerator and both candidate denominators):
+
+```{r}
+#| label: tbl-country-denominators-detail
+
+reactable_template(
+  denom_by_def,
+  col_names = list(
+    pop_brk               = reactable::colDef(name = "Population Group"),
+    alert_lab             = reactable::colDef(name = "Alert Def"),
+    n_countries_top3      = reactable::colDef(name = "N Top-3", defaultSortOrder = "desc"),
+    n_countries_rankable  = reactable::colDef(name = "N Rankable"),
+    n_countries_triggered = reactable::colDef(name = "N Triggered", defaultSortOrder = "desc")
+  )
+)
+```
+
+Caption figures, pulled directly from the band-level summary so they update with the data:
+
+```{r}
+#| label: caption-country-denominators
+
+rk <- setNames(denom_by_band$n_countries_rankable,  denom_by_band$pop_brk)
+tg <- setNames(denom_by_band$max_triggered_any_def, denom_by_band$pop_brk)
+
+caption_text <- glue::glue(
+  "Cell values give the number of countries in which each alert definition ranked among ",
+  "the top three by utility score, out of the countries with a complete utility score in ",
+  "each band (up to {rk[['< 50k']]} for <50k, {rk[['[50k, 500k)']]} for 50k-500k, and ",
+  "{rk[['\U2265 500k']]} for >=500k). The denominator is defined per definition, as a ",
+  "country can only rank a definition it can score; the <50k band rests on a small ",
+  "rankable set and should be interpreted with caution. Because alert definitions were not ",
+  "triggered in every country, individual definitions need not reach these maxima \U2014 the ",
+  "most general definitions triggered in up to {tg[['< 50k']]}, {tg[['[50k, 500k)']]}, and ",
+  "{tg[['\U2265 500k']]} countries respectively."
+)
+
+caption_text
+```
