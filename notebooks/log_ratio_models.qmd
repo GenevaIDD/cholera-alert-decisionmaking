@@ -1,0 +1,2254 @@
+---
+title: "Hierarchical Log Ratio Models"
+format:
+  html:
+    self-contained: true
+params:
+  model_choice: "modelB2" 
+  rerun_model: false   
+  alert_no: 8               
+  pop_group: "50Kto500K"           
+  location_filter: "outbreak-prone"   
+  run_model_selection: false 
+  constant: 1
+  do_prior_check: true  
+  compare_epidemic_endemic_posteriors: false 
+  transform_posterior: true 
+  rate_ratio_model: false
+  remove_censored: false
+  fig_path: "manuscript_figures"
+editor: source
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+#| code-fold: true
+
+library(tidyverse)
+library(rstan)
+library(loo)
+library(bayesplot)
+library(posterior)
+library(glue)
+library(parallel)
+library(OutbreakExtractR)
+library(kableExtra)
+library(patchwork)
+library(knitr)
+library(DT)
+library(stringr)
+
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = FALSE)
+theme_set(theme_minimal())
+
+## user selections
+model_choice <- params$model_choice  ## options: "modelA1", "modelA2", "modelB", "modelB2", "modelC", "modelD"
+rerun_model <- params$rerun_model    ## set to FALSE to load previous fit
+alert_no <- params$alert_no               ## options: 1 to 24
+pop_group <- params$pop_group          ## options: "under_50K", "50Kto500K", "over_500K"
+location_filter <- params$location_filter  ## options: "all", "endemic", "outbreak-prone"
+run_model_selection <- params$run_model_selection ## whether to run the model selection with LOO and WAIC
+constant <- params$constant ## constant added to the calculation of the ratio to ensure we have no undefined ratios when cases are 0
+do_prior_check <- params$do_prior_check  ## whether to run a prior predictive check
+compare_epidemic_endemic_posteriors <- params$compare_epidemic_endemic_posteriors ## whether to compare posteriors of alpha0 between settings, use if model fits exist
+transform_posterior <- params$transform_posterior ## whether to transform posterior to exp(posterior)-1 to get effect of delay per week in the natural scale
+rate_ratio_model <- params$rate_ratio_model
+remove_censored <- params$remove_censored
+fig_path <- params$fig_path ## where we save slope summaries to get manuscript figure 5
+
+## load stan model
+stan_file <- switch(model_choice,
+  "modelA1" = "../stan/log_ratio_model_A1.stan",
+  "modelA2" = "../stan/log_ratio_model_A2.stan",
+  "modelB" = "../stan/log_ratio_model_B.stan",
+  "modelB2" = "../stan/log_ratio_model_B2.stan",
+  "modelB3" = "../stan/log_ratio_model_B3.stan",  
+  "modelC" = "../stan/log_ratio_model_C.stan",
+  "modelD" = "../stan/log_ratio_model_D.stan",  
+)
+
+fit_file <- paste0("fit_", model_choice, "_a", alert_no, "_", pop_group, "_", location_filter,".rds")
+```
+
+```{r headline, echo=FALSE, results='asis'}
+
+## map model choice to description
+model_description <- switch(model_choice,
+  "modelA1" = "A1: Simple null model with global rate",
+  "modelA2" = "A2: Global slope and alert-specific deviation",
+  "modelB" = "B: Global slope and country-specific deviation",
+  "modelB2" = "B2: Global slope, country and alert-level deviation",
+  "modelB3" = "B3: Global slope, country, admin1, and alert-level deviation",
+  "modelC" = "C: Global slope and location-specific deviation",
+  "modelD" = "D: Global slope, admin1, and alert-level deviation"
+)
+
+## create headline
+cat(glue("# Alert {alert_no} – Population Group: {pop_group} – {model_description} - {location_filter}\n"))
+
+```
+
+## Model Specifications
+
+::::{.center}
+\begin{longtable}{p{2cm} p{12cm}}
+\hline
+\textbf{Model} & \textbf{Equations} \\
+\hline
+
+\textbf{A2} &
+\[
+r_i = \log\left(\frac{y_{d_i}}{y_{\text{delay at week 0}}}\right)
+\]
+\[
+r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
+\]
+\[
+\mu_i = \beta_{alert[i]} \, d_i
+\]
+\[
+\beta_{alert[i]} = \alpha_{global} + \alpha_{alert[i]}
+\]
+\[
+\alpha_{global} \sim N(0,\sigma_{global}), \quad \sigma_{global} \sim \text{HalfNormal}(1)
+\]
+\[
+\alpha_{alert} \sim N(0,\sigma_{alert}), \quad \sigma_{alert} \sim \text{HalfNormal}(0.25)
+\]
+\\[1em]
+
+\textbf{B} &
+\[
+r_i = \log\left(\frac{y_{d_i}}{y_{\text{delay at week 0}}}\right)
+\]
+\[
+r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
+\]
+\[
+\mu_i = \beta_{country[i]} \, d_i
+\]
+\[
+\beta_{country[i]} = \alpha_{global} + \alpha_{country[i]}
+\]
+\[
+\alpha_{global} \sim N(0,\sigma_{global}), \quad \sigma_{global} \sim \text{HalfNormal}(1)
+\]
+\[
+\alpha_{country} \sim N(0,\sigma_{country}), \quad \sigma_{country} \sim \text{HalfNormal}(0.5)
+\]
+\\[1em]
+
+\textbf{B2} &
+\[
+r_i = \log\left(\frac{y_{d_i}}{y_{\text{delay at week 0}}}\right)
+\]
+\[
+r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
+\]
+\[
+\mu_i = \beta_{alert[i]} \, d_i
+\]
+\[
+\beta_{alert[i]} = \alpha_{global} + \alpha_{country[i]} + \alpha_{alert[i]}
+\]
+\[
+\alpha_{global} \sim N(0,\sigma_{global}), \quad \sigma_{global} \sim \text{HalfNormal}(1)
+\]
+\[
+\alpha_{country} \sim N(0,\sigma_{country}), \quad \sigma_{country} \sim \text{HalfNormal}(0.5)
+\]
+\[
+\alpha_{alert} \sim N(0,\sigma_{alert}), \quad \sigma_{alert} \sim \text{HalfNormal}(0.25)
+\]
+\\[1em]
+
+\textbf{B3} &
+\[
+r_i = \log\left(\frac{y_{d_i}}{y_{\text{delay at week 0}}}\right)
+\]
+\[
+r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
+\]
+\[
+\mu_i = \beta_{alert[i]} \, d_i
+\]
+\[
+\beta_{alert[i]} = \alpha_{global} + \alpha_{country[i]} + \alpha_{admin1[i]} + \alpha_{alert[i]}
+\]
+\[
+\alpha_{global} \sim N(0,\sigma_{global}), \quad \sigma_{global} \sim \text{HalfNormal}(1)
+\]
+\[
+\alpha_{country} \sim N(0,\sigma_{country}), \quad \sigma_{country} \sim \text{HalfNormal}(0.5)
+\]
+\[
+\alpha_{admin1} \sim N(0,\sigma_{admin1}), \quad \sigma_{admin1} \sim \text{HalfNormal}(0.5)
+\]
+\[
+\alpha_{alert} \sim N(0,\sigma_{alert}), \quad \sigma_{alert} \sim \text{HalfNormal}(0.25)
+\]
+\\[1em]
+
+\textbf{C} &
+\[
+r_i = \log\left(\frac{y_{d_i}}{y_{\text{delay at week 0}}}\right)
+\]
+\[
+r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
+\]
+\[
+\mu_i = \beta_{location[i]} \, d_i
+\]
+\[
+\beta_{location[i]} = \alpha_{global} + \alpha_{location[i]}
+\]
+\[
+\alpha_{global} \sim N(0,\sigma_{global}), \quad \sigma_{global} \sim \text{HalfNormal}(1)
+\]
+\[
+\alpha_{location} \sim N(0,\sigma_{location}), \quad \sigma_{location} \sim \text{HalfNormal}(0.5)
+\]
+\\[1em]
+
+\textbf{D} &
+\[
+r_i = \log\left(\frac{y_{d_i}}{y_{\text{delay at week 0}}}\right)
+\]
+\[
+r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
+\]
+\[
+\mu_i = \beta_{alert[i]} \, d_i
+\]
+\[
+\beta_{alert[i]} = \alpha_{global} + \alpha_{admin1[i]} + \alpha_{alert[i]}
+\]
+\[
+\alpha_{global} \sim N(0,\sigma_{global}), \quad \sigma_{global} \sim \text{HalfNormal}(1)
+\]
+\[
+\alpha_{admin1} \sim N(0,\sigma_{admin1}), \quad \sigma_{admin1} \sim \text{HalfNormal}(0.5)
+\]
+\[
+\alpha_{alert} \sim N(0,\sigma_{alert}), \quad \sigma_{alert} \sim \text{HalfNormal}(0.25)
+\]
+\\[1em]
+
+\hline
+\end{longtable}
+::::
+
+
+```{r}
+#| label: load-data
+#| code-fold: true
+
+## load evaluation data for all delay values
+delays <- seq(from = 0, to = 24, by = 1)
+
+data_list <- map(delays, ~ readRDS(paste0("../../main_ecl_dec2024/outputs/evaluation_cases_dw", ., "_ew52.rds")) %>%
+                   mutate(delay = .x))
+
+data <- bind_rows(data_list)
+
+data <- data %>%
+  mutate(
+    ## extract admin1
+    admin1 = sapply(str_split(alert_id, "::"), function(x) if (length(x) >= 3) x[3] else NA),
+    ## extract spatial scale based on number of "::"
+    spatial_scale = case_when(
+      str_count(alert_id, "::") == 1 ~ "country",
+      str_count(alert_id, "::") == 2 ~ "admin1",
+      str_count(alert_id, "::") >= 3 ~ "admin2",
+      TRUE ~ "unknown"
+    )
+  )
+
+## applying OutbreakExtractR filtering function
+which_setting <- case_when(
+  location_filter == "endemic" ~ "endemic",
+  location_filter == "outbreak-prone" ~ "epidemic",
+  TRUE ~ "all"
+)
+
+data <- OutbreakExtractR::filter_ms_data(
+  df = data,
+  which_setting = which_setting,
+  incl_trend_alerts = TRUE
+)
+
+data <- data %>%
+  mutate(
+    alert_number = str_extract(alert_id, "(?<=^[A-Za-z])\\d+(?=_)")
+  ) %>%
+  filter(alert_number == alert_no) %>%
+  select(alert_id, total_sCh, delay, location, admin1, spatial_scale) %>%
+  rename(Sch = total_sCh) %>%
+  mutate(Sch = as.integer(Sch)) %>%
+  tidyr::extract(alert_id, into = "year", regex = "_(\\d{4})", remove = FALSE)
+
+## load population data to select only required population group
+ts_population <- readRDS("../../main_ecl_dec2024/inputs/time_series_preoutbreak_extraction.rds") %>%
+  transmute(location, year = as.character(year(TL)), pop) %>%
+  distinct() %>%
+  group_by(year, location) %>%
+  slice(1) %>%
+  ungroup()
+
+data <- data %>%
+  left_join(ts_population, by = c("location", "year")) %>%
+  distinct()
+
+## filter by population group
+data <- data %>%
+  filter(case_when(
+    pop_group == "under_50K" ~ pop < 50000,
+    pop_group == "50Kto500K" ~ pop >= 50000 & pop < 500000,
+    pop_group == "over_500K" ~ pop >= 500000,
+    TRUE ~ TRUE
+  ))
+
+data <- data %>%
+  mutate(
+    alert_id_index = as.integer(factor(alert_id)),
+    location_id = as.integer(factor(location))
+  )
+
+## calculating ratios and log-ratios
+
+if (rate_ratio_model) {
+
+  ## load observed weeks
+  observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
+
+  ## join only the columns we need, avoid duplicate names
+  data <- data %>%
+    left_join(
+      observed_weeks %>% select(alert_id, delay, O_weeks),  # only join needed columns
+      by = c("alert_id", "delay")
+    )
+
+  ## calculate ratios and log ratios
+  data <- data %>%
+    group_by(alert_id) %>%
+    mutate(
+      Sch_delay0 = Sch[delay == 0],
+      O_weeks_delay0 = O_weeks[delay == 0],  ## observed weeks at delay 0
+      Sch_ratio = ((Sch + constant) / (O_weeks + constant)) / ((Sch_delay0 + constant) / (O_weeks_delay0 + constant)),
+      Log_Sch_ratio = log(Sch_ratio)
+    ) %>%
+    ungroup() %>%
+    filter(delay != 0)
+  } else {
+
+  ## optionally remove censored alerts
+  if (remove_censored) {
+
+    observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
+
+    data <- data %>%
+      left_join(
+        observed_weeks %>% select(alert_id, delay, O_weeks),
+        by = c("alert_id", "delay")
+      ) %>%
+      filter(O_weeks >= 52)
+  }
+
+  data <- data %>%
+  group_by(alert_id) %>%
+  mutate(Sch_delay0 = Sch[delay == 0]) %>%
+  ungroup() %>%
+  mutate(
+    Sch_ratio = (Sch + constant) / (Sch_delay0 + constant),
+    Log_Sch_ratio = log(Sch_ratio)
+  ) %>%
+  filter(delay != 0)
+}
+
+```
+
+```{r}
+#| label: prepare-stan-data
+#| code-fold: true
+
+prepare_stan_data <- function(data, model_choice) {
+  factor_index <- function(x) as.integer(factor(x))
+  if (model_choice == "modelA1") {
+    stan_data <- list(
+      N = nrow(data),
+      r = data$Log_Sch_ratio,
+      d = data$delay
+    )
+    
+  } else if (model_choice == "modelA2") {
+  data <- data %>% mutate(alert_index = factor_index(alert_id))
+  
+  stan_data <- list(
+    N = nrow(data),
+    J = length(unique(data$alert_index)),
+    alert = data$alert_index,
+    r = data$Log_Sch_ratio,
+    d = data$delay
+  )
+  
+  lookup <- list(
+    alert_lookup = data %>%
+      distinct(alert_index, alert_id) %>%
+      arrange(alert_index)
+  )
+  
+  return(list(data = data, stan_data = stan_data, lookup = lookup))
+} else if (model_choice == "modelB") {
+  data <- data %>%
+    mutate(
+      country = str_extract(location, "(?<=::)[A-Z]{3}(?=::|$)"),  
+      country_id = factor_index(country)
+    )
+  
+  stan_data <- list(
+    N = nrow(data),
+    C = length(unique(data$country_id)),
+    country = data$country_id,   
+    r = data$Log_Sch_ratio,
+    d = data$delay
+  )
+  
+  lookup <- list(
+    country_lookup = data %>% distinct(country_id, country)
+  )
+  } else if (model_choice == "modelB2") {
+  data <- data %>%
+    mutate(
+      country = str_extract(location, "(?<=::)[A-Z]{3}(?=::|$)"),  
+      country_id = factor_index(country),
+      alert_index = factor_index(alert_id)
+    )
+
+  alert_country_lookup <- data %>%
+    distinct(alert_index, country_id, alert_id, country) %>%
+    arrange(alert_index)
+
+  stan_data <- list(
+    N = nrow(data),
+    C = length(unique(data$country_id)),
+    J = length(unique(data$alert_index)),
+    country = data$country_id,
+    alert = data$alert_index,
+    country_alert = alert_country_lookup$country_id,  
+    r = data$Log_Sch_ratio,
+    d = data$delay
+  )
+
+  lookup <- list(
+    alert_country_lookup = alert_country_lookup,
+    country_lookup       = data %>% distinct(country_id, country)
+  )
+  } else if (model_choice == "modelB3") {
+    if (!"admin1" %in% names(data)) stop("admin1 column missing before prepare_stan_data() for modelB3")
+    
+    data <- data %>%
+      mutate(
+        country = str_extract(location, "(?<=::)[A-Z]{3}(?=::|$)"),
+        country_id = factor_index(country),
+        admin1_combined = paste(country, admin1, sep = "::"),
+        admin1_index = factor_index(admin1_combined),
+        alert_index = factor_index(alert_id)
+      )
+    
+    admin1_lookup <- data %>%
+      distinct(admin1_index, country_id, country, admin1) %>%
+      arrange(admin1_index)
+    
+    alert_lookup <- data %>%
+      distinct(alert_index, admin1_index, alert_id) %>%
+      arrange(alert_index)
+    
+    alert_country_admin1_lookup <- alert_lookup %>%
+      left_join(admin1_lookup, by = "admin1_index")  
+    
+    U <- nrow(admin1_lookup)
+    J <- nrow(alert_lookup)
+    
+    stan_data <- list(
+      N = nrow(data),
+      C = length(unique(data$country_id)),
+      U = U,
+      J = J,
+      country = data$country_id,
+      admin1 = data$admin1_index,
+      alert = data$alert_index,
+      country_admin1 = admin1_lookup$country_id,  # length U
+      admin1_alert = alert_lookup$admin1_index,   # length J
+      r = data$Log_Sch_ratio,
+      d = data$delay
+    )
+    
+    lookup <- list(
+      country_lookup = data %>% distinct(country_id, country),
+      admin1_lookup  = admin1_lookup,
+      alert_lookup   = alert_lookup,
+      alert_country_admin1_lookup = alert_country_admin1_lookup
+    )
+    return(list(data = data, stan_data = stan_data, lookup = lookup))
+    
+  } else if (model_choice == "modelC") {
+
+  location_lookup <- data %>%
+    distinct(location_id, location) %>%
+    arrange(location_id) %>%
+    mutate(loc_index = 1:n())
+  
+  data <- data %>%
+    left_join(location_lookup, by = c("location_id", "location"))
+
+  stan_data <- list(
+    N = nrow(data),
+    E = nrow(location_lookup),   
+    loc = data$loc_index,
+    r = data$Log_Sch_ratio,
+    d = data$delay
+  )
+  
+  lookup <- list(
+    location_lookup = location_lookup
+  )
+  
+  return(list(data = data, stan_data = stan_data, lookup = lookup))
+} else if (model_choice == "modelD") {
+  if (!"admin1" %in% names(data)) stop("admin1 column missing before prepare_stan_data() for modelD")
+
+  data <- data %>%
+    mutate(
+      country = str_extract(location, "(?<=::)[A-Z]{3}(?=::|$)"),
+      country_id = factor_index(country),
+      admin1_combined = paste(country, admin1, sep = "::"),
+      admin1_index = factor_index(admin1_combined),
+      alert_index = factor_index(alert_id)
+    )
+
+  admin1_lookup <- data %>%
+    distinct(admin1_index, country_id, country, admin1) %>%
+    arrange(admin1_index)
+
+  alert_lookup <- data %>%
+    distinct(alert_index, alert_id, admin1_index) %>%
+    arrange(alert_index)
+
+  alert_admin1_lookup <- alert_lookup %>%
+    left_join(admin1_lookup, by = "admin1_index")
+
+  U <- nrow(admin1_lookup)
+  J <- nrow(alert_lookup)
+
+  stan_data <- list(
+    N = nrow(data),
+    U = U,
+    J = J,
+    admin1 = data$admin1_index,
+    alert = data$alert_index,
+    admin1_alert = alert_lookup$admin1_index,  
+    r = data$Log_Sch_ratio,
+    d = data$delay
+  )
+
+  lookup <- list(
+    admin1_lookup = admin1_lookup,
+    alert_lookup  = alert_lookup,
+    alert_admin1_lookup = alert_admin1_lookup
+  )
+
+  return(list(data = data, stan_data = stan_data, lookup = lookup))
+}
+ else {
+    stop("Unknown model_choice")
+  }
+  
+  return(list(data = data, stan_data = stan_data, lookup = lookup))
+}
+
+
+
+```
+
+```{r}
+#| label: prepared-data-checks
+
+models_need_admin1 <- c("modelB3", "modelD")
+
+if (model_choice %in% models_need_admin1) {
+
+  n_before <- nrow(data)
+  n_na_admin1 <- sum(is.na(data$admin1) | data$admin1 == "")
+
+  if (n_na_admin1 > 0) {
+    message(glue::glue("Model {model_choice} requires admin1. Removing {n_na_admin1} observations with missing admin1 (out of {n_before})."))
+  }
+
+  data <- data %>%
+    filter(!(is.na(admin1) | admin1 == ""))
+
+  n_after <- nrow(data)
+  if (n_after == 0) stop("No data left after removing rows with missing admin1. Check your filters (alert_no, population, location_filter).")
+
+  ## quick sanity checks
+  n_admin1 <- data %>% distinct(admin1) %>% nrow()
+  if (n_admin1 < 5) {
+    warning(glue::glue("Only {n_admin1} unique admin1 units remain — hierarchical admin1 estimates may be weak."))
+  }
+}
+
+## prepare stan_data
+prepared <- prepare_stan_data(data, model_choice)
+data <- prepared$data
+stan_data <- prepared$stan_data
+
+message(glue::glue("Prepared stan_data for {model_choice}: N={stan_data$N}"))
+if (!is.null(stan_data$C)) message(glue::glue("Countries: {stan_data$C}"))
+if (!is.null(stan_data$U)) message(glue::glue("Admin1 units: {stan_data$U}"))
+if (!is.null(stan_data$J)) message(glue::glue("Alerts: {stan_data$J}"))
+
+
+```
+
+```{r}
+#| label: run-or-reload-model
+#| code-fold: true
+
+if (rerun_model || !file.exists(fit_file)) {
+  message("Running Stan model...")
+
+  fit <- rstan::stan(
+    file = stan_file,
+    data = stan_data,
+    chains = 4,
+    iter = 6000,
+    warmup = 3000,
+    seed = 123,
+    control = list(adapt_delta = 0.98, max_treedepth = 15)
+  )
+ 
+  message("Finished running Stan model...")
+  saveRDS(fit, fit_file)
+  message("Model fit saved to: ", fit_file)
+
+} else {
+  if (!file.exists(fit_file)) {
+    stop("Saved model file not found: ", fit_file)
+  }
+
+  message("Loading saved model fit from: ", fit_file)
+  fit <- readRDS(fit_file)
+}
+
+```
+
+## Priors Used
+
+```{r}
+#| label: print-priors
+#| code-fold: true
+
+## function to extract priors from stan model
+extract_stan_priors <- function(stan_file) {
+  stan_lines <- readLines(stan_file)
+  
+  ## keep only lines with ~
+  prior_lines <- stan_lines[grepl("~", stan_lines)]
+  
+  ## remove comments after // or #
+  prior_lines <- sub("//.*", "", prior_lines)
+  prior_lines <- sub("#.*", "", prior_lines)
+  
+  prior_lines <- prior_lines[grepl("[a-zA-Z0-9_]+\\s*~", prior_lines)]
+  
+  priors_list <- data.frame(
+    Parameter = sub("\\s*~.*", "", prior_lines) |> trimws(),
+    Prior     = sub(".*~\\s*", "", prior_lines) |> trimws(),
+    stringsAsFactors = FALSE
+  )
+  
+  priors_list$Prior <- gsub(";", "", priors_list$Prior)
+  
+  half_normal_idx <- grepl("^(tau|sigma)", priors_list$Parameter)
+  
+  scales <- sub(".*normal\\([^,]+,\\s*([0-9\\.eE+-]+)\\).*", "\\1", priors_list$Prior[half_normal_idx])
+  
+  priors_list$Prior[half_normal_idx] <- paste0("half-normal(", scales, ")")
+  
+  return(priors_list)
+}
+
+priors_list <- extract_stan_priors(stan_file)
+
+priors_list %>%
+  kable(format = "html", caption = paste0("Priors extracted from ", model_choice)
+  ) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("hover", "striped", "condensed", "responsive")
+  )
+
+```
+
+```{r}
+#| label: print-priors-2
+#| code-fold: true
+#| results: asis
+
+## priors from all models for manuscript table with priors
+
+## model lists
+all_models <- c("modelA1","modelA2","modelB","modelB2","modelB3","modelC","modelD")
+
+stan_paths <- list(
+  modelA1 = "../stan/log_ratio_model_A1.stan",
+  modelA2 = "../stan/log_ratio_model_A2.stan",
+  modelB  = "../stan/log_ratio_model_B.stan",
+  modelB2 = "../stan/log_ratio_model_B2.stan",
+  modelB3 = "../stan/log_ratio_model_B3.stan",
+  modelC  = "../stan/log_ratio_model_C.stan",
+  modelD  = "../stan/log_ratio_model_D.stan"
+)
+
+model_descriptions <- list(
+  modelA1 = "A1",
+  modelA2 = "A2",
+  modelB  = "B",
+  modelB2 = "B2",
+  modelB3 = "B3",
+  modelC  = "C",
+  modelD  = "D"
+)
+
+param_labels <- tibble::tribble(
+  ~Parameter,       ~ParamLabel,
+  "tau_alert",      "<em>σ<sub>alert</sub></em>",
+  "alpha_alert",    "<em>α<sub>alert</sub></em>",
+  "tau_country",    "<em>σ<sub>country</sub></em>",
+  "alpha_country",  "<em>α<sub>country</sub></em>",
+  "tau_admin1",     "<em>σ<sub>admin1</sub></em>",
+  "alpha_admin1",   "<em>α<sub>admin1</sub></em>",
+  "tau_loc",        "<em>σ<sub>loc</sub></em>",
+  "alpha_loc",      "<em>α<sub>loc</sub></em>",
+  "sigma",          "<em>σ</em>",
+  "beta",           "<em>β</em>",
+  "alpha0",         "<em>α<sub>global</sub></em>",
+  "alpha_admin1_std","<em>α<sub>admin1_std</sub></em>"
+)
+
+## extract priors
+priors_all <- purrr::map_df(all_models, function(m){
+  p <- extract_stan_priors(stan_paths[[m]])
+  p$model <- model_descriptions[[m]]
+  p
+})
+
+priors_all <- priors_all %>%
+  mutate(
+    Prior = as.character(Prior),
+    Prior = gsub("(?i)Normal", "𝒩", Prior, perl = TRUE),       
+    Prior = gsub("(?i)HalfNormal", "<em>HalfNormal</em>", Prior, perl = TRUE)
+  )
+
+param_lookup <- setNames(param_labels$ParamLabel, param_labels$Parameter)
+
+replace_params_in_prior <- function(txt) {
+  purrr::reduce(names(param_lookup), function(acc, key) {
+    gsub(key, param_lookup[[key]], acc, fixed = TRUE)
+  }, .init = txt)
+}
+
+priors_all <- priors_all %>%
+  left_join(param_labels, by = "Parameter") %>%
+  mutate(
+    ParamLabel = coalesce(ParamLabel, Parameter),
+    Prior = replace_params_in_prior(Prior)
+  )
+
+priors_table <- priors_all %>%
+  select(model, ParamLabel, Prior) %>%
+  pivot_wider(
+    names_from = ParamLabel,
+    values_from = Prior,
+    values_fill = "",
+    values_fn = list(Prior = ~as.character(.))  # force character
+  ) %>%
+  arrange(model) %>%
+  select(-any_of("r"))
+
+## print
+priors_table %>%
+  kable("html", escape = FALSE, caption = "Model Priors") %>%
+  kable_styling(full_width = TRUE, position = "center") %>%
+  as.character() %>%
+  htmltools::HTML() %>%
+  htmltools::div(style = "width:80%; margin:auto;") %>%
+  print()
+
+
+```
+
+## Model Fit Summary
+
+
+```{r}
+#| label: model-fit-summary-stan
+#| code-fold: true
+#| eval: true
+#| results: asis
+
+extract_summary_table <- function(fit, pars = NULL, probs = c(0.025, 0.5, 0.975)) {
+  all_pars <- names(rstan::extract(fit))
+  if (!is.null(pars)) pars <- intersect(pars, all_pars)
+  
+  s <- summary(fit, pars = pars, probs = probs)$summary
+  df <- as.data.frame(s)
+  
+  df$Parameter <- rownames(df)
+  rownames(df) <- NULL
+  
+  df <- df[, c("Parameter","mean","sd","2.5%","50%","97.5%","n_eff","Rhat")]
+  colnames(df) <- c("Parameter","Mean","SD","2.5%","Median","97.5%","n_eff","Rhat")
+  
+  df[, -1] <- round(df[, -1], 3)
+  df
+}
+
+pretty_table <- function(df, caption) {
+  df %>%
+    kbl(
+      caption = caption,
+      align = paste0("l", strrep("c", ncol(df) - 1)),
+      booktabs = TRUE,
+      linesep = ""
+    ) %>%
+    kable_styling(
+      latex_options = "basic",
+      full_width = TRUE,
+      position = "center",
+      font_size = 18
+    )
+}
+
+
+report_model <- function(fit, lookup, model_name = "", location_filter = "", return_df = FALSE) {
+
+  # Parameters to extract
+  pars_to_include <- c(
+    "alpha_global_exp_m1",
+    "alpha_country_eff_exp_m1",
+    "alpha_country",            # raw alpha_country
+    "alpha_admin1_eff_exp_m1",
+    "alpha_alert_eff_exp_m1",
+    "alpha_loc_eff_exp_m1",
+    "sigma",
+    "tau_country",
+    "tau_admin1",
+    "tau_alert",
+    "tau_loc"
+  )
+  
+  df <- extract_summary_table(fit, pars = pars_to_include)
+
+  df$Parameter[df$Parameter == "alpha_global_exp_m1"] <- "Global effect (% change)"
+  
+  country_rows <- grepl("^alpha_country_eff_exp_m1", df$Parameter)
+  alpha_country_rows <- grepl("^alpha_country\\[", df$Parameter)
+  
+  if (any(country_rows | alpha_country_rows) && !is.null(lookup$country_lookup)) {
+    # Extract indices
+    idx_country_eff <- as.integer(str_extract(df$Parameter[country_rows], "(?<=\\[)\\d+(?=\\])"))
+    idx_alpha_country <- as.integer(str_extract(df$Parameter[alpha_country_rows], "(?<=\\[)\\d+(?=\\])"))
+    
+    country_codes_eff <- lookup$country_lookup$country[match(idx_country_eff, lookup$country_lookup$country_id)]
+    country_codes_raw <- lookup$country_lookup$country[match(idx_alpha_country, lookup$country_lookup$country_id)]
+    
+    df$Parameter[country_rows] <- paste0("Country: ", country_codes_eff, " (% change)")
+    df$Parameter[alpha_country_rows] <- paste0("Country (deviation): ", country_codes_raw)
+  }
+
+  admin1_rows <- grepl("^alpha_admin1_eff_exp_m1", df$Parameter)
+  if(any(admin1_rows) && !is.null(lookup$admin1_lookup)) {
+    idx <- as.integer(str_extract(df$Parameter[admin1_rows], "(?<=\\[)\\d+(?=\\])"))
+    admin1_names <- lookup$admin1_lookup$admin1[match(idx, lookup$admin1_lookup$admin1_index)]
+    countries <- lookup$admin1_lookup$country[match(idx, lookup$admin1_lookup$admin1_index)]
+    df$Parameter[admin1_rows] <- paste0("Admin1: ", countries, "::", admin1_names, " (% change)")
+  }
+
+  loc_rows <- grepl("^alpha_loc_eff_exp_m1", df$Parameter)
+  if(any(loc_rows) && !is.null(lookup$location_lookup)) {
+    idx <- as.integer(str_extract(df$Parameter[loc_rows], "(?<=\\[)\\d+(?=\\])"))
+    loc_names <- lookup$location_lookup$location[match(idx, lookup$location_lookup$loc_index)]
+    df$Parameter[loc_rows] <- paste0("Location: ", loc_names, " (% change)")
+  }
+
+  alert_rows <- grepl("^alpha_alert_eff_exp_m1", df$Parameter)
+  if(any(alert_rows)) {
+    idx <- as.integer(str_extract(df$Parameter[alert_rows], "(?<=\\[)\\d+(?=\\])"))
+    
+    if(!is.null(lookup$alert_country_admin1_lookup)) {
+      tmp <- lookup$alert_country_admin1_lookup
+      df$Parameter[alert_rows] <- paste0(
+        "Alert: ", tmp$country[match(idx, tmp$alert_index)], "::",
+        tmp$admin1[match(idx, tmp$alert_index)], "::",
+        tmp$alert_id[match(idx, tmp$alert_index)], " (% change)"
+      )
+    } else if(!is.null(lookup$alert_country_lookup)) {
+      tmp <- lookup$alert_country_lookup
+      df$Parameter[alert_rows] <- paste0(
+        "Alert: ", tmp$country[match(idx, tmp$alert_index)], "::",
+        tmp$alert_id[match(idx, tmp$alert_index)], " (% change)"
+      )
+    } else if(!is.null(lookup$alert_admin1_lookup)) {
+      tmp <- lookup$alert_admin1_lookup
+      df$Parameter[alert_rows] <- paste0(
+        "Alert: ", tmp$admin1[match(idx, tmp$alert_index)], "::",
+        tmp$alert_id[match(idx, tmp$alert_index)], " (% change)"
+      )
+    } else if(!is.null(lookup$alert_lookup)) {
+      tmp <- lookup$alert_lookup
+      df$Parameter[alert_rows] <- paste0(
+        "Alert: ", tmp$alert_id[match(idx, tmp$alert_index)], " (% change)"
+      )
+    }
+  }
+  
+  df$Parameter[df$Parameter == "sigma"] <- "Measurement SD"
+  df$Parameter[df$Parameter == "tau_country"] <- "Country-level SD"
+  df$Parameter[df$Parameter == "tau_admin1"] <- "Admin1-level SD"
+  df$Parameter[df$Parameter == "tau_alert"] <- "Alert-level SD"
+  df$Parameter[df$Parameter == "tau_loc"] <- "Location-level SD"
+  
+  if(return_df) return(df)
+  pretty_table(df, paste("Posterior summary for", model_name, location_filter))
+}
+
+posterior_summaries <- report_model(fit = fit, lookup = prepared$lookup)
+posterior_summaries
+
+
+
+```
+
+
+## Traceplots and Posterior Densities
+
+```{r}
+#| label: traceplots
+#| code-fold: true
+#| eval: true
+
+# ## helper function to plot traceplots for n random indices of a vector parameter
+plot_random_indices <- function(fit, param, n = 3) {
+
+  ## extract parameter names from Stan fit
+  param_names <- dimnames(rstan::extract(fit, permuted = FALSE))[[3]]
+
+  candidates <- grep(paste0("^", param, "\\["), param_names, value = TRUE)
+
+  if (length(candidates) == 0) {
+    if (param %in% param_names) {
+      message("Parameter '", param, "' is scalar — plotting directly.")
+      print(mcmc_trace(fit, pars = param))
+    } else {
+      message("Parameter '", param, "' not found in fit (check spelling or model_choice).")
+    }
+    return(invisible(NULL))
+  }
+
+  ## select random indices for plotting
+  sel_pars <- sample(candidates, min(n, length(candidates)))
+  message("Plotting random indices of ", param, ": ", paste(sel_pars, collapse = ", "))
+
+  ## traceplots
+  print(mcmc_trace(fit, pars = sel_pars))
+}
+
+
+## helper function to plot alpha_alert in modelB2 and B3
+plot_random_alpha_alert <- function(fit, n = 3) {
+  param_names <- dimnames(rstan::extract(fit, permuted = FALSE))[[3]]
+  candidates <- grep("^alpha_alert\\[", param_names, value = TRUE)
+
+  if(length(candidates) == 0) {
+    message("No alpha_alert parameters found in fit.")
+    return(invisible(NULL))
+  }
+
+  sel_pars <- sample(candidates, min(n, length(candidates)))
+  message("Plotting random alpha_alert indices: ", paste(sel_pars, collapse = ", "))
+
+  print(mcmc_trace(fit, pars = sel_pars))
+}
+
+
+## plotting depending on the model choice
+
+if(model_choice == "modelA1"){
+  print(mcmc_trace(fit, pars = c("beta", "sigma")))
+  print(mcmc_dens_overlay(fit, pars = c("beta", "sigma")))
+  plot_random_indices(fit, "beta")
+}
+
+if(model_choice == "modelA2"){
+  print(mcmc_trace(fit, pars = c("alpha0", "tau_alert", "sigma")))
+  print(mcmc_dens_overlay(fit, pars = c("alpha0", "tau_alert", "sigma")))
+  plot_random_indices(fit, "alpha_alert")
+}
+
+if(model_choice == "modelB"){
+  print(mcmc_trace(fit, pars = c("alpha0", "tau_country", "sigma")))
+  print(mcmc_dens_overlay(fit, pars = c("alpha0", "tau_country", "sigma")))
+  plot_random_indices(fit, "alpha_country")
+}
+
+if(model_choice == "modelB2"){
+  print(mcmc_trace(fit, pars = c("alpha0", "tau_country", "tau_alert", "sigma")))
+  print(mcmc_dens_overlay(fit, pars = c("alpha0", "tau_country", "tau_alert", "sigma")))
+
+  plot_random_indices(fit, "alpha_country")   ## country deviations
+  plot_random_alpha_alert(fit, n = 5)        ## flattened alert deviations, length J
+}
+
+if(model_choice == "modelB3"){
+  print(mcmc_trace(fit, pars = c("alpha0", "tau_country", "tau_alert","tau_admin1", "sigma")))
+  print(mcmc_dens_overlay(fit, pars = c("alpha0", "tau_country", "tau_alert","tau_admin1", "sigma")))
+
+  plot_random_indices(fit, "alpha_country")   ## country deviations
+  plot_random_indices(fit, "alpha_admin1")    ## admin1 deviations
+  plot_random_alpha_alert(fit, n = 5)         ## alert deviations
+}
+
+if(model_choice == "modelC"){
+  print(mcmc_trace(fit, pars = c("alpha0", "tau_loc", "sigma")))
+  print(mcmc_dens_overlay(fit, pars = c("alpha0", "tau_loc", "sigma")))
+  plot_random_indices(fit, "alpha_loc")
+}
+
+if(model_choice == "modelD"){
+  print(mcmc_trace(fit, pars = c("alpha0", "tau_alert","tau_admin1", "sigma")))
+  print(mcmc_dens_overlay(fit, pars = c("alpha0", "tau_alert","tau_admin1", "sigma")))
+
+  plot_random_indices(fit, "alpha_admin1")    ## admin1 deviations
+  plot_random_alpha_alert(fit, n = 5)         ## alert deviations
+}
+```
+
+```{r}
+#| label: rhats
+#| code-fold: true
+#| eval: true
+
+## function to compute R-hat per observation for r_rep ===
+compute_rhat_rrep <- function(fit) {
+  
+  draws <- as_draws_df(fit)
+  
+  if (transform_posterior) {
+    param_cols <- !grepl("^\\.", colnames(draws))
+    draws[param_cols] <- lapply(draws[param_cols], function(x) exp(x) - 1)
+  }
+  
+  r_rep_cols <- grep("^r_rep\\[", colnames(draws), value = TRUE)
+  if (length(r_rep_cols) == 0) stop("No r_rep columns found.")
+  
+  tibble(
+    Observation = seq_along(r_rep_cols),
+    Rhat = sapply(r_rep_cols, function(col) rhat(draws[[col]]))
+  )
+}
+
+## use the function
+rhat_df <- compute_rhat_rrep(fit)
+
+## the plot
+ggplot(rhat_df, aes(x = Observation, y = Rhat)) +
+  geom_point(color = "darkblue") +
+  labs(
+    title = "R-hat per observation",
+    x = expression(hat(R)),
+    y = "Observation"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+## Prior Predictive Checks
+
+```{r}
+#| code-fold: true
+
+## running prior predictive check
+if (do_prior_check) {
+  message("Running prior predictive simulation...")
+
+  fit_prior <- rstan::stan(
+    file = stan_file,
+    data = stan_data,
+    chains = 1,
+    iter = 6000,
+    seed = 123,
+    algorithm = "Fixed_param"
+  )
+
+  ## explore prior predictive simulation
+  prior_samples <- rstan::extract(fit_prior)
+  
+  r_prior_pred <- prior_samples$r_prior_pred
+  tau_country_prior <- prior_samples$tau_country
+  tau_alert_prior <- prior_samples$tau_alert
+  sigma_prior <- prior_samples$sigma
+  
+  ## plot of prior predictive vs observed
+
+  prior_pred_df <- tibble(
+  observed = stan_data$r,
+  prior_predicted = apply(r_prior_pred, 2, mean)  ## mean across prior draws
+)
+  
+ggplot(prior_pred_df, aes(x = observed, y = prior_predicted)) +
+  geom_point(alpha = 0.6, color = "lightblue4") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(title = "Prior Predictive Check: Observed vs Predicted",
+       x = "Observed log-ratio",
+       y = "Mean of Prior Predicted")
+
+  
+}
+
+```
+
+```{r}
+#| label: prior-predictive-check
+#| code-fold: true
+
+if (do_prior_check) {
+
+  r_mat <- as.matrix(r_prior_pred)
+  ndraws <- nrow(r_mat)
+  N <- ncol(r_mat)
+
+  sel_draws <- sample(1:ndraws, min(200, ndraws))
+
+  sim_df <- tibble(
+    draw = rep(sel_draws, each = N),
+    r = as.vector(t(r_mat[sel_draws, , drop = FALSE])),
+    type = "Prior Simulated"
+  )
+
+  obs_df <- tibble(
+    r = stan_data$r,
+    type = "Observed"
+  )
+
+  plot_df <- bind_rows(sim_df, obs_df) %>%
+    mutate(type = factor(type, levels = c("Prior Simulated", "Observed")))
+
+  ggplot() +
+    geom_density(
+      data = plot_df %>% filter(type == "Prior Simulated"),
+      aes(x = r, group = draw),
+      fill = "steelblue", color = NA, alpha = 0.05
+    ) +
+    geom_density(
+      data = plot_df %>% filter(type == "Observed"),
+      aes(x = r),
+      color = "black", size = 1.2
+    ) +
+    labs(
+      title = "Density of Observed and Prior Predicted Log Ratios",
+      x = "Log ratio",
+      y = "Density"
+    ) +
+    theme_minimal(base_size = 14)
+}
+
+
+```
+
+## Posterior Predictive Check Scatterplot
+
+Here we generate data from the posterior and compare them to our observed log-ratios.
+
+```{r}
+#| code-fold: true
+#| eval: true
+
+posterior_samples <- rstan::extract(fit)
+
+## generated data from the posterior
+r_rep <- posterior_samples$r_rep  
+r_hat <- apply(r_rep, 2, mean)   ## posterior predictive mean for each obs
+
+ppc_df <- tibble(
+  observed = stan_data$r,
+  predicted = r_hat,
+  delay = stan_data$d,
+  loc = data$location
+)
+
+ggplot(ppc_df, aes(x = observed, y = predicted)) +
+  geom_point(alpha = 0.6, color = "skyblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(title = "Posterior Predictive Check: Observed vs Predicted",
+       x = "Observed log-ratio",
+       y = "Predicted mean log-ratio")
+
+
+
+```
+
+## Compare Prior Predictive, Posterior Predictive, and Observed
+
+```{r}
+#| eval: true
+
+## prior predictive
+r_mat_prior <- as.matrix(r_prior_pred)
+sel_prior <- sample(1:nrow(r_mat_prior), min(200, nrow(r_mat_prior)))
+prior_df <- tibble(
+  draw = rep(sel_prior, each = ncol(r_mat_prior)),
+  r    = as.vector(t(r_mat_prior[sel_prior, , drop = FALSE])),
+  type = "Prior Predictive"
+)
+
+## posterior predictive
+r_mat_post <- as.matrix(r_rep)
+sel_post <- sample(1:nrow(r_mat_post), min(200, nrow(r_mat_post)))
+post_df <- tibble(
+  draw = rep(sel_post, each = ncol(r_mat_post)),
+  r    = as.vector(t(r_mat_post[sel_post, , drop = FALSE])),
+  type = "Posterior Predictive"
+)
+
+## observed
+obs_df <- tibble(
+  r    = stan_data$r,
+  type = "Observed"
+)
+
+## combine
+all_df <- bind_rows(prior_df, post_df, obs_df)
+
+## plot
+ggplot(all_df, aes(x = r, fill = type, color = type)) +
+  geom_density(alpha = 0.2, size = 0.7) +
+  scale_color_viridis_d(option = "D") +
+  scale_fill_viridis_d(option = "D") +
+  labs(
+    title = "Observed vs Prior & Posterior Predictive Densities",
+    x = "Log ratio",
+    y = "Density",
+    color = "",
+    fill = ""
+  ) +
+  theme_minimal()
+
+
+```
+
+## Effect of Delay on Measurement Variability
+
+```{r}
+#| eval: true
+
+## explore the effect of delay in measurement variability in observed vs posterior predictive log-ratios
+
+## sd of observed log ratios
+obs_summary <- data %>%
+  group_by(delay) %>%
+  summarise(
+    sd_r = sd(Log_Sch_ratio, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(source = "Observed")
+
+## sd of posterior predictive log ratios
+ppc_summary <- ppc_df %>%
+  group_by(delay) %>%
+  summarise(
+    sd_r = sd(predicted, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(source = "Posterior Predictive")
+
+combined_summary <- bind_rows(obs_summary, ppc_summary)
+
+## plot
+ggplot(combined_summary, aes(x = delay, y = sd_r, color = source)) +
+  geom_point(size = 2) +
+  geom_line(linewidth = 0.8) +
+  labs(
+    title = "Standard deviation of log-ratios by delay",
+    x = "Delay",
+    y = "SD of log-ratios",
+    color = "Source"
+  ) +
+  theme_minimal()
+
+## plot with raw values
+
+## raw values
+obs_raw <- data %>%
+  select(delay, value = Log_Sch_ratio) %>%
+  mutate(source = "Observed")
+
+ppc_raw <- ppc_df %>%
+  select(delay, value = predicted) %>%
+  mutate(source = "Posterior Predictive")
+
+combined_raw <- bind_rows(obs_raw, ppc_raw)
+
+## plot raw values per delay
+ggplot(combined_raw, aes(x = factor(delay), y = value, color = source)) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+  labs(
+    title = "Raw log-ratio values by delay",
+    x = "Delay",
+    y = "Log-ratio",
+    color = "Source"
+  ) +
+  theme_minimal()
+
+```
+
+## Effective Slopes per level (summing global and deviation level posteriors per draw)
+
+```{r,  fig.height=35, fig.width=15, warning=FALSE}
+#| code-fold: true
+#| eval: true
+
+## function that gets the summed posteriors from the stan fit to plot them
+summarize_effective_slopes <- function(fit, model_choice, prep, transform_posterior = TRUE) {
+
+  draws <- as_draws_df(fit)
+  
+  if (transform_posterior) {
+    param_cols <- !grepl("^\\.|^lp__", colnames(draws))
+    draws[param_cols] <- lapply(draws[param_cols], function(x) exp(x) - 1)
+  }
+
+  lookup <- prep$lookup
+
+  summarize_draws_df <- function(x) {
+    tibble(
+      median = apply(x, 2, median),
+      q5   = apply(x, 2, quantile, 0.05),
+      q95  = apply(x, 2, quantile, 0.95)
+    )
+  }
+
+  ## global
+  global <- tibble(
+    median = median(draws$alpha0),
+    q5     = quantile(draws$alpha0, 0.05),
+    q95    = quantile(draws$alpha0, 0.95),
+    level  = "global",
+    id     = "global"
+  )
+
+  ## country (% change)
+  country <- NULL
+  country_cols <- names(draws)[grepl("^alpha_country_eff\\[", names(draws))]
+  if (length(country_cols) > 0) {
+    country <- summarize_draws_df(draws %>% select(all_of(country_cols))) %>%
+      mutate(level = "country", country_index = row_number())
+
+    if (!is.null(lookup$country_lookup)) {
+      country <- country %>%
+        left_join(lookup$country_lookup %>% select(country_id, country),
+                  by = c("country_index" = "country_id")) %>%
+        mutate(id = country)
+    } else {
+      country <- country %>% mutate(id = paste0("country_", country_index))
+    }
+  }
+  
+  ## raw country deviation
+  alpha_country <- NULL
+  alpha_country_cols <- names(draws)[grepl("^alpha_country\\[", names(draws))]
+  if (length(alpha_country_cols) > 0) {
+    alpha_country <- summarize_draws_df(draws %>% select(all_of(alpha_country_cols))) %>%
+      mutate(level = "country_raw", country_index = row_number())
+
+    if (!is.null(lookup$country_lookup)) {
+      alpha_country <- alpha_country %>%
+        left_join(lookup$country_lookup %>% select(country_id, country),
+                  by = c("country_index" = "country_id")) %>%
+        mutate(id = paste0(country, " (deviation)"))
+    } else {
+      alpha_country <- alpha_country %>% mutate(id = paste0("country_raw_", country_index))
+    }
+  }
+
+  ## admin1
+  admin1 <- NULL
+  admin1_cols <- names(draws)[grepl("^alpha_admin1_eff\\[", names(draws))]
+  if (length(admin1_cols) > 0) {
+    admin1 <- summarize_draws_df(draws %>% select(all_of(admin1_cols))) %>%
+      mutate(level = "admin1", admin1_index = row_number())
+
+    if (!is.null(lookup$admin1_lookup)) {
+      admin1 <- admin1 %>%
+        left_join(lookup$admin1_lookup %>% select(admin1_index, admin1, country),
+                  by = "admin1_index") %>%
+        mutate(id = paste0(country, "::", admin1))
+    } else {
+      admin1 <- admin1 %>% mutate(id = paste0("admin1_", admin1_index))
+    }
+  }
+
+  ## alert
+  alert <- NULL
+  alert_cols <- names(draws)[grepl("^alpha_alert_eff\\[", names(draws))]
+  if (length(alert_cols) > 0) {
+    alert <- summarize_draws_df(draws %>% select(all_of(alert_cols))) %>%
+      mutate(level = "alert", alert_index = row_number())
+
+    if (!is.null(lookup$alert_country_admin1_lookup)) {
+      alert <- alert %>%
+        left_join(lookup$alert_country_admin1_lookup %>%
+                    select(alert_index, alert_id, country, admin1),
+                  by = "alert_index") %>%
+        mutate(id = paste0(country, "::", admin1, "::", alert_id))
+    } else if (!is.null(lookup$alert_country_lookup)) {
+      alert <- alert %>%
+        left_join(lookup$alert_country_lookup %>% select(alert_index, alert_id, country),
+                  by = "alert_index") %>%
+        mutate(id = paste0(country, "::", alert_id))
+    } else if (!is.null(lookup$alert_admin1_lookup)) {
+      alert <- alert %>%
+        left_join(lookup$alert_admin1_lookup %>% select(alert_index, alert_id, admin1),
+                  by = "alert_index") %>%
+        mutate(id = paste0(admin1, "::", alert_id))
+    } else if (!is.null(lookup$alert_lookup)) {
+      alert <- alert %>%
+        left_join(lookup$alert_lookup %>% select(alert_index, alert_id),
+                  by = "alert_index") %>%
+        mutate(id = alert_id)
+    } else {
+      alert <- alert %>% mutate(id = paste0("alert_", alert_index))
+    }
+  }
+
+  ## location
+  location <- NULL
+  if (model_choice == "modelC") {
+    loc_cols <- names(draws)[grepl("^alpha_loc_eff\\[", names(draws))]
+    if (length(loc_cols) > 0) {
+      location <- summarize_draws_df(draws %>% select(all_of(loc_cols))) %>%
+        mutate(level = "location", loc_index = row_number())
+
+      if (!is.null(lookup$location_lookup)) {
+        location <- location %>%
+          left_join(lookup$location_lookup %>% select(loc_index, location),
+                    by = "loc_index") %>%
+          mutate(id = location)
+      } else {
+        location <- location %>% mutate(id = paste0("location_", loc_index))
+      }
+    }
+  }
+
+  bind_rows(global, country, alpha_country, admin1, alert, location)
+}
+
+slope_summaries <- summarize_effective_slopes(fit, model_choice, transform_posterior = transform_posterior ,prepared)
+readr::write_rds(slope_summaries,
+  paste0(fig_path, "/slope_summaries_", model_choice, "_a", alert_no, "_", pop_group, "_", location_filter,".rds")
+)
+
+```
+
+```{r, fig.height=35, fig.width=15, warning=FALSE}
+
+df_for_plot <- report_model(
+  fit, 
+  lookup = prepared$lookup, 
+  location_filter, 
+  return_df = TRUE
+)
+
+slope_summaries2 <- df_for_plot %>%
+  select(
+    id = Parameter,
+    median = Median,
+    q5 = `2.5%`,
+    q95 = `97.5%`
+  ) %>%
+  mutate(
+    level = case_when(
+      grepl("^Global", id)   ~ "global",
+      grepl("^Country:", id) ~ "country",
+      grepl("^Admin1:", id)  ~ "admin1",
+      grepl("^Location:", id)~ "location",
+      grepl("^Alert:", id)   ~ "alert",
+      TRUE                   ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(level))
+
+plot_effective_slopes <- function(slope_summaries, title = "Posterior effects") {
+
+  ggplot(slope_summaries, aes(x = median, y = id, color = level)) +
+    geom_point(size = 2.5) +
+    geom_errorbarh(aes(xmin = q5, xmax = q95), height = 0.2, linewidth = 0.6) +
+    
+    # global reference line (if exists)
+    geom_vline(
+      data = subset(slope_summaries, level == "global"),
+      aes(xintercept = median),
+      linetype = "dashed",
+      color = "black"
+    ) +
+    labs(
+      title = title,
+      x = "% change",
+      y = "",
+      color = "Level"
+    ) +
+    theme_minimal(base_size = 16) +
+    theme(
+      legend.position = "top",
+      axis.text.y = element_text(size = 12),
+      panel.grid.minor = element_blank()
+    )
+}
+
+plot_effective_slopes(slope_summaries2)
+
+```
+
+```{r}
+#| eval: true
+
+## Map with country-level slopes 
+if (model_choice %in% c("modelB", "modelB2", "modelB3")) {
+
+  country_exp_summary <- df_for_plot %>%
+    dplyr::filter(grepl("^Country:", .data[["Parameter"]])) %>%
+    dplyr::mutate(
+      country_code = gsub("^Country: (.+) \\(% change\\)$", "\\1", .data[["Parameter"]]),
+      perc_change = .data[["Median"]],   
+      perc_q5    = .data[["2.5%"]],
+      perc_q95   = .data[["97.5%"]]
+    )
+
+  africa <- giscoR::gisco_get_countries(
+    region = "Africa",
+    resolution = "3"
+  )
+
+  africa_slopes <- africa %>%
+    left_join(
+      country_exp_summary,
+      by = c("ISO3_CODE" = "country_code")
+    )
+
+    ggplot(africa_slopes) +
+    geom_sf(aes(fill = perc_change), color = "gray70") +
+    scale_fill_viridis_c(
+      option = "D",
+      direction = 1,
+      na.value = "white",
+      name = "Effect per week (%)"
+    ) +
+    ggspatial::annotation_scale(
+      location = "bl",
+      width_hint = 0.25,
+      text_cex = 0.6
+    ) +
+    ggspatial::annotation_north_arrow(
+      location = "tl",
+      which_north = "true",
+      style = ggspatial::north_arrow_fancy_orienteering,
+      height = unit(0.8, "cm"),
+      width  = unit(0.8, "cm")
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "right",
+      plot.title = element_text(hjust = 0.5),
+      axis.ticks = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank()
+    )
+}
+
+```
+
+```{r, fig.height=20, fig.width=15, warning=FALSE}
+#| code-fold: true
+#| eval: true
+
+if (model_choice == "modelB2") {
+  
+  plot_alerts_by_country_B2 <- function(summaries) {
+  summaries <- summaries %>%
+    filter(level %in% c("country", "alert")) %>%
+    mutate(
+      ## extract date from alert id
+      date = as.Date(sub(".*_(\\d{4}-\\d{2}-\\d{2})$", "\\1", alert_id)),
+      ## get administrative level
+      admin_level = case_when(
+        str_count(alert_id, "::") == 1 ~ "0",
+        str_count(alert_id, "::") == 2 ~ "1",
+        str_count(alert_id, "::") == 3 ~ "2",
+        str_count(alert_id, "::") == 4 ~ "3",
+        TRUE ~ "other"
+      )
+    )
+  
+  ggplot() +
+    geom_errorbarh(
+      data = summaries %>% filter(level == "alert"),
+      aes(xmin = q5, xmax = q95, x = median, y = date, color = admin_level),
+      height = 0.3
+    ) +
+    geom_point(
+      data = summaries %>% filter(level == "alert"),
+      aes(x = median, y = date, color = admin_level),
+      size = 3
+    ) +
+    
+    ## country slope 
+    geom_errorbarh(
+      data = summaries %>% filter(level == "country") %>%
+        left_join(summaries %>% group_by(country) %>%
+                    summarise(min_date = min(date, na.rm = TRUE)), by = "country") %>%
+        mutate(plot_date = min_date - 10),
+      aes(xmin = q5, xmax = q95, x = median, y = plot_date),
+      height = 0.5, color = "black", size = 1.2,
+      inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = summaries %>% filter(level == "country") %>%
+        left_join(summaries %>% group_by(country) %>%
+                    summarise(min_date = min(date, na.rm = TRUE)), by = "country") %>%
+        mutate(plot_date = min_date - 10),
+      #aes(x = mean, y = plot_date),
+      aes(x = median, y = plot_date),
+      color = "black", size = 5,
+      inherit.aes = FALSE
+    ) +
+    
+    coord_flip() +
+    facet_wrap(~ country, scales = "free") +
+    scale_y_date(
+      date_labels = "%Y-%m-%d"  
+    ) +
+    labs(
+      x = "Slope", 
+      y = "Date", 
+      color = "Administrative Level",
+      title = "Country slopes and individual alerts"
+    ) +
+    theme_minimal(base_size = 20) +
+    theme(
+      axis.text.x = element_text(angle = 30)
+    )
+}
+  
+  plot_alerts_by_country_B2(slope_summaries)
+} 
+
+## MODEL B3
+plot_alerts_by_country_B3 <- function(summaries) {
+
+  summaries <- summaries %>%
+    filter(level %in% c("alert", "country"))
+  message("Rows after filtering levels: ", nrow(summaries))
+
+  summaries <- summaries %>%
+    mutate(
+      country_iso3 = case_when(
+        level == "country" ~ id,
+        level == "alert" ~ str_split(id, "::", simplify = TRUE)[,1],
+        TRUE ~ NA_character_
+      )
+    )
+  message("Unique country_iso3 values:")
+  print(unique(summaries$country_iso3))
+
+  summaries <- summaries %>%
+    mutate(
+      admin_level = case_when(
+        level == "alert" & str_count(alert_id, "::") == 2 ~ "1",
+        level == "alert" & str_count(alert_id, "::") == 3 ~ "2",
+        level == "alert" & str_count(alert_id, "::") == 4 ~ "3",
+        level == "alert" ~ "0",
+        TRUE ~ NA_character_
+      )
+    )
+
+  summaries <- summaries %>%
+    mutate(
+      date = as.Date(sub(".*_(\\d{4}-\\d{2}-\\d{2})$", "\\1", id), format = "%Y-%m-%d")
+    )
+
+  country_positions <- summaries %>%
+    filter(level == "country") %>%
+    #select(country_iso3, mean, q5, q95) %>%
+    select(country_iso3, median, q5, q95) %>%
+    mutate(plot_date = min(summaries$date[summaries$country_iso3 == country_iso3], na.rm = TRUE) - 10)
+
+  summaries <- summaries %>%
+    left_join(country_positions %>% select(country_iso3, plot_date), by = "country_iso3")
+
+  ggplot() +
+    geom_errorbarh(
+      data = summaries %>% filter(level == "alert"),
+      aes(xmin = q5, xmax = q95, x = median, y = date, color = admin_level),
+      height = 0.3
+    ) +
+    geom_point(
+      data = summaries %>% filter(level == "alert"),
+      aes(x = median, y = date, color = admin_level),
+      size = 3
+    ) +
+    geom_errorbarh(
+      data = summaries %>% filter(level == "country" & !is.na(plot_date)),
+      aes(xmin = q5, xmax = q95, x = median, y = plot_date),
+      height = 0.5, color = "black", size = 1.2,
+      inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = summaries %>% filter(level == "country" & !is.na(plot_date)),
+      aes(x = median, y = plot_date),
+      color = "black", size = 5,
+      inherit.aes = FALSE
+    ) +
+    coord_flip() +
+    facet_wrap(~ country_iso3, scales = "free_y") +
+    scale_y_date(date_labels = "%Y-%m-%d") +
+    labs(
+      x = "Slope",
+      y = "Date",
+      color = "Administrative Level",
+      title = "Country slopes and individual alerts"
+    ) +
+    theme_minimal(base_size = 20) +
+    theme(axis.text.x = element_text(angle = 30))
+}
+
+if (model_choice == "modelB3") {
+  plot_alerts_by_country_B3(slope_summaries)
+}
+
+```
+
+```{r}
+#| code-fold: true
+#| eval: true
+
+## check that a soft sum to zero constraint is indeed in place 
+draws_list <- rstan::extract(fit, permuted = TRUE)
+
+if ("alpha_country" %in% names(draws_list)) {
+  alpha_country_draws <- draws_list$alpha_country  
+  ## posterior means per country
+  country_means <- colMeans(alpha_country_draws)
+  sum_country_means <- sum(country_means)
+  message("Sum of posterior means (country slopes): ", sum_country_means)
+
+  ## distribution of the sum across draws
+  sum_country_draws <- rowSums(alpha_country_draws)  
+  mean_sum_country <- mean(sum_country_draws)
+  sd_sum_country   <- sd(sum_country_draws)
+  ci_sum_country   <- quantile(sum_country_draws, c(0.025, 0.5, 0.975))
+  print(list(mean = mean_sum_country, sd = sd_sum_country, ci = ci_sum_country))
+}
+
+if ("alpha_alert" %in% names(draws_list)) {
+  alpha_alert_draws <- draws_list$alpha_alert  ## draws x J
+  alert_means <- colMeans(alpha_alert_draws)
+  sum_alert_means <- sum(alert_means)
+  message("Sum of posterior means (alert slopes): ", sum_alert_means)
+
+  sum_alert_draws <- rowSums(alpha_alert_draws)
+  print(list(mean = mean(sum_alert_draws),
+             sd = sd(sum_alert_draws),
+             ci = quantile(sum_alert_draws, c(0.025,0.5,0.975))))
+}
+
+
+```
+
+```{r,fig.height=32, fig.width=15}
+#| code-fold: true
+#| eval: true
+
+### MODELB2
+## VERSION 1: Creating a straight line going through all the delay values and just plotting the predicted slope per alert and per country
+
+if(model_choice == "modelB2"){
+  
+  obs_logratio_country <- data %>%
+  group_by(country, delay) %>%
+  summarise(
+    obs_log_ratio = mean(Log_Sch_ratio, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+  ## function version with observed
+  plot_slopes_B2 <- function(slope_summaries, obs_country,
+                           delays = seq(from=0,to=24, by=1)) {
+
+  plot_data <- slope_summaries %>%
+    filter(level %in% c("country", "alert")) %>%
+    tidyr::expand_grid(delay = delays) %>%
+    mutate(
+      #predicted = mean * delay,
+      predicted = median * delay,
+      predicted_low = q5 * delay,
+      predicted_high = q95 * delay,
+      id_short = case_when(
+        level == "alert" & !is.na(alert_index) ~ paste0("alert_", alert_index),
+        level == "alert" & is.na(alert_index) ~ "alert",
+        level == "country" ~ country
+      )
+    )
+
+  ggplot(plot_data, aes(x = delay)) +
+
+    ## alert
+    geom_ribbon(data = plot_data %>% filter(level == "alert"),
+                aes(ymin = predicted_low, ymax = predicted_high,
+                    group = id_short, fill = "Alert"),
+                alpha = 0.2) +
+    geom_line(data = plot_data %>% filter(level == "alert"),
+              aes(y = predicted, group = id_short, color = "Alert"),
+              alpha = 0.6, size = 0.8) +
+
+    ## country
+    geom_ribbon(data = plot_data %>% filter(level == "country"),
+                aes(ymin = predicted_low, ymax = predicted_high,
+                    fill = "Country"),
+                alpha = 0.2) +
+    geom_line(data = plot_data %>% filter(level == "country"),
+              aes(y = predicted, color = "Country"),
+              size = 1.5, linetype = "dashed") +
+
+    ## observed average
+    geom_point(data = obs_country,
+               aes(x = delay, y = obs_log_ratio),
+               shape = 21, fill = "black", color = "black", size = 2.5) +
+
+    facet_wrap(~ country, scales = "free_y") +
+
+    scale_color_manual(name = "Level",
+                       values = c("Alert" = "steelblue",
+                                  "Country" = "firebrick")) +
+    scale_fill_manual(name = "Level",
+                      values = c("Alert" = "steelblue",
+                                 "Country" = "firebrick")) +
+
+    labs(
+      x = "Delay",
+      y = "Log-ratio",
+      title = "Predicted slopes with observed country-average log-ratios"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "top")
+}
+
+ ## apply plotting function for model B2
+  plot_slopes_B2(slope_summaries, obs_logratio_country)
+}
+
+## VERSION 2: creating the alert line using the predicted ratio for each observation at different delay values 
+## and linking observation points with lines if they belong to the same alert
+## here the country line is just the average of the predicted ratios per observation at the country level
+
+if (model_choice == "modelB2") {
+
+  draws <- as_draws_df(fit)
+  ## predicted log-ratios
+  r_rep_cols <- grep("^r_rep\\[", colnames(draws), value = TRUE)
+  r_rep_long <- draws %>%
+    as_tibble() %>%   # drop draws_df class
+    select(all_of(r_rep_cols)) %>%
+    pivot_longer(cols = everything(),
+                 names_to = "obs",
+                 values_to = "r_rep") %>%
+    mutate(obs = as.integer(str_extract(obs, "\\d+")))
+
+  ## table for each observation
+  obs_lookup <- tibble(
+    obs = seq_along(stan_data$d),
+    delay = as.numeric(stan_data$d),
+    alert_index = stan_data$alert,
+    country_index = stan_data$country
+  ) %>%
+    left_join(
+      data %>% distinct(alert_id_index, alert_id, country_id, country),
+      by = c("alert_index" = "alert_id_index",
+             "country_index" = "country_id")
+    )
+
+  r_rep_long <- r_rep_long %>%
+    left_join(obs_lookup, by = "obs")
+
+  ## summarising posterior predictive distribution
+  pred_summary <- r_rep_long %>%
+    group_by(country, alert_id, delay) %>%
+    summarise(
+      mean = mean(r_rep),
+      q5   = quantile(r_rep, 0.05),
+      q95  = quantile(r_rep, 0.95),
+      .groups = "drop"
+    )
+
+  ggplot(pred_summary, aes(x = delay, y = mean, group = alert_id)) +
+    geom_ribbon(aes(ymin = q5, ymax = q95, group = alert_id),
+                fill = "grey70", alpha = 0.2) +
+    geom_line(color = "grey40", size = 0.6, alpha = 0.7) +
+    geom_point(color = "grey20", size = 1) +
+
+    ## country averages (mean of alerts per country)
+    stat_summary(
+      fun = mean,
+      geom = "line",
+      aes(group = country),
+      color = "firebrick", size = 1.2
+    ) +
+
+    facet_wrap(~ country, scales = "free_y") +
+
+    labs(
+      x = "Delay",
+      y = "Predicted log-ratio",
+      title = "Posterior predictive log-ratio by delay"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "none")
+
+}
+
+
+```
+
+```{r}
+#| code-fold: true
+#| eval: true
+
+## line plot
+### MODEL A2
+
+## VERSION 1: Creating a straight line going through all the delay values and just plotting the predicted slope per alert and per country
+
+if (model_choice == "modelA2") {
+  
+  plot_slopes_A2 <- function(slope_summaries, delay_values) {
+    
+    plot_data <- slope_summaries %>%
+      filter(level == "alert") %>%
+      tidyr::expand_grid(delay = delay_values) %>%
+      mutate(
+        predicted = median * delay,
+        predicted_low = q5 * delay,
+        predicted_high = q95 * delay,
+        id_short = ifelse(!is.na(alert_id), alert_id, paste0("alert_", id))
+      )
+    
+    ggplot(plot_data, aes(x = delay)) +
+      
+      ## alerts + CI
+      geom_ribbon(aes(ymin = predicted_low, ymax = predicted_high, group = id_short, fill = "Alert"),
+                  alpha = 0.1) +
+      geom_line(aes(y = predicted, group = id_short, color = "Alert"),
+                alpha = 0.7, size = 0.9) +
+      
+      scale_color_manual(name = "Level", values = c("Alert" = "steelblue")) +
+      scale_fill_manual(name = "Level", values = c("Alert" = "steelblue")) +
+      
+      labs(
+        x = "Delay",
+        y = "Predicted log-ratio",
+        title = "Predicted log-ratio by delay for alerts (Model A2)"
+      ) +
+      theme_minimal(base_size = 14) +
+      theme(legend.position = "top")
+  }
+  
+  ## apply plotting function for model A2
+  plot_slopes_A2(slope_summaries, delay_values = delays)
+}
+
+## VERSION 2: creating the alert line using the predicted ratio for each observation at different delay values 
+## and linking observation points with lines if they belong to the same alert
+## here the country line is just the average of the predicted ratios per observation at the country level
+
+if (model_choice == "modelA2") {
+
+  draws <- as_draws_df(fit)
+
+  ## getting fitted values per observation
+  r_rep_cols <- grep("^r_rep\\[", colnames(draws), value = TRUE)
+  r_rep_long <- draws %>%
+    select(all_of(r_rep_cols)) %>%
+    pivot_longer(cols = everything(),
+                 names_to = "obs",
+                 values_to = "r_rep") %>%
+    mutate(obs = as.integer(str_extract(obs, "\\d+")))
+  
+  ## one row per observation
+  obs_lookup <- tibble(
+    obs = seq_along(stan_data$d),
+    delay = as.numeric(stan_data$d),
+    alert_index = stan_data$alert
+  ) %>%
+    left_join(data %>% distinct(alert_id_index, alert_id),
+              by = c("alert_index" = "alert_id_index"))
+  
+  r_rep_long <- r_rep_long %>%
+    left_join(obs_lookup, by = "obs")
+  
+  ## summarise posterior predictive distribution
+  pred_summary <- r_rep_long %>%
+    group_by(alert_id, delay) %>%
+    summarise(
+      mean = mean(r_rep),
+      q5 = quantile(r_rep, 0.05),
+      q95 = quantile(r_rep, 0.95),
+      .groups = "drop"
+    )
+  
+  ## plot
+  ggplot(pred_summary, aes(x = delay, y = mean, group = alert_id)) +
+    geom_ribbon(aes(ymin = q5, ymax = q95, group = alert_id), 
+                fill = "grey70", alpha = 0.2) +
+    geom_line(color = "grey40", size = 0.7, alpha = 0.7) +
+    geom_point(color = "grey20", size = 1) +
+    labs(
+      x = "Delay",
+      y = "Predicted log-ratio",
+      title = "Posterior predictive log-ratio by delay (each line is an alert)"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "none")
+}
+
+```
+
+## Model Selection with LOO and WAIC
+
+We compare the candidate models with Leave One Out Cross-Validation (LOO) and the Widely Applicable Information Criterion (WAIC) because they work best in the context of Bayesian Hierarchical Models. They use samples from the posterior distribution rather than using a single point estimate like the Akaike Information Criterion (AIC) which uses Maximum Likelihood Estimation.
+
+WAIC calculates a bias-corrected estimate of predictive accuracy based on the log-likelihood evaluated across all posterior samples, while LOO approximates cross-validation by evaluating how well the model predicts each data point when that point is left out during fitting. Both criteria provide uncertainty (as standard errors) instead of just point estimates.
+
+Another benefit of using information criteria is that they allow selecting the most parsimonious model. While criteria like AIC do this by penalizing models with a larger number of parameters, in Bayesian Hierarchical Models the notion of "effective number of parameters" is less clear: The number of effective parameters in this context can be ambiguous because the model "shares" information across groups (partial pooling means some of the variation can be explained by a higher level) and incorporates priors which limit how much a parameter can vary, reducing its "effective" contribution to model complexity.
+
+**The model with the highest LOO and the WAIC values is preferred**
+
+```{r model_comparison, eval=run_model_selection}
+#| code-fold: true
+#| results: asis
+
+model_ids <- c("modelA1", "modelA2", "modelB", "modelB2","modelB3", "modelC", "modelD")
+model_labels <- c(
+  "A1: Simple null model with global rate",
+  "A2: Global slope and alert-specific deviation",
+  "B: Global slope and country-specific deviation",
+  "B2: Global slope, country-specific deviation, and alert-level deviation",
+  "B3: Global slope, country, admin1, and alert-level deviation",
+  "C: Global slope and location-specific deviation", 
+  "D: Global slope, admin1, and alert-specific deviation"
+)
+
+fit_files <- paste0("fit_", model_ids, "_a", alert_no, "_", pop_group, "_", location_filter,".rds")
+
+## only use the models whose fit files actually exist
+existing_models <- file.exists(fit_files)
+fit_files <- fit_files[existing_models]
+model_ids <- model_ids[existing_models]
+model_labels <- model_labels[existing_models]
+
+if (length(fit_files) < 1) {
+  stop("No model fit files found for this alert and population group.")
+}
+
+## memory-safe LOO/WAIC computation
+compute_loo_waic <- function(file) {
+  fit <- readRDS(file)
+
+  loglik <- extract_log_lik(fit, merge_chains = FALSE)
+
+  out <- list(
+    loo = loo(loglik),
+    waic = waic(loglik)
+  )
+
+  rm(fit, loglik)
+  gc()
+
+  out
+}
+
+results <- purrr::map(fit_files, compute_loo_waic)
+
+loos  <- purrr::map(results, "loo")
+waics <- purrr::map(results, "waic")
+
+
+```
+
+**LOO**
+
+```{r,  eval=run_model_selection}
+#| code-fold: true
+#| results: asis
+
+names(loos) <- model_labels
+if (length(loos) >= 2) {
+  print(loo::loo_compare(loos))
+} else {
+  message("Not enough models for loo_compare (requires at least 2).")
+}
+```
+
+**WAIC**
+
+```{r,  eval=run_model_selection}
+#| code-fold: true
+#| results: asis
+
+## create a WAIC summary table
+waic_df <- tibble(
+  Model = model_labels,
+  elpd_waic = map_dbl(waics, ~ .x$estimates["elpd_waic", "Estimate"]),
+  se_waic = map_dbl(waics, ~ .x$estimates["elpd_waic", "SE"])
+)
+
+waic_df
+
+```
+
+```{r, eval=run_model_selection}
+#| code-fold: true
+#| results: asis
+
+## manuscript LOO table
+
+names(loos) <- model_labels
+
+if (length(loos) >= 2) {
+  loo_tbl <- as.data.frame(loo::loo_compare(loos))
+  loo_tbl$Model <- rownames(loo_tbl)
+  rownames(loo_tbl) <- NULL
+  loo_tbl <- loo_tbl[, c("Model", setdiff(names(loo_tbl), "Model"))]
+
+  loo_table <- kable(
+    loo_tbl,
+    caption = paste0("Model Comparison using LOO for ",location_filter, " locations"),
+    digits = 2,
+    align = c("l", rep("r", ncol(loo_tbl) - 1))
+  ) %>%
+    kable_styling(full_width = FALSE, position = "center") 
+
+    print(loo_table)
+
+    save_kable(loo_table, file = "loo_comparison.html")
+  
+} else {
+  message("Not enough models for loo_compare (requires at least 2).")
+}
+
+## manuscript WAIC table
+
+names(waics) <- model_labels
+
+if (length(waics) >= 2) {
+  waic_tbl <- as.data.frame(loo::loo_compare(waics))
+  waic_tbl$Model <- rownames(waic_tbl)
+  rownames(waic_tbl) <- NULL
+  waic_tbl <- waic_tbl[, c("Model", setdiff(names(waic_tbl), "Model"))]
+
+  waic_pretty <- waic_tbl %>%
+    kable(
+      caption = paste0("Model Comparison using WAIC for ",location_filter, " locations"),
+      digits = 2,
+      align = c("l", rep("r", ncol(waic_tbl) - 1))
+    ) %>%
+    kable_styling(
+      full_width = FALSE,
+      position = "center"
+    )
+
+  print(waic_pretty)
+
+  save_kable(waic_pretty, file = "waic_comparison.html")
+
+} else {
+  message("Not enough models for loo_compare (requires at least 2).")
+}
+
+
+```
+
+```{r compare_B2_D_alpha0, eval=compare_epidemic_endemic_posteriors}
+#| code-fold: true
+#| warning: false
+#| message: false
+#| fig-height: 6
+
+## load models fits
+fit_file_B2 <- glue::glue("fit_modelB2_a{alert_no}_{pop_group}_outbreak-prone.rds")
+fit_file_D  <- glue::glue("fit_modelD_a{alert_no}_{pop_group}_endemic.rds")
+
+fit_B2 <- readRDS(fit_file_B2)
+fit_D  <- readRDS(fit_file_D)
+
+## convert draws to data frames
+draws_B2 <- posterior::as_draws_df(fit_B2)
+draws_D  <- posterior::as_draws_df(fit_D)
+
+## posterior density for alpha0
+alpha_df <- bind_rows(
+  draws_B2 %>% select(alpha0) %>% mutate(model = "Model B2 (Outbreak-prone)"),
+  draws_D  %>% select(alpha0) %>% mutate(model = "Model D (Endemic)")
+)
+
+p_alpha0 <- ggplot(alpha_df, aes(x = alpha0, fill = model, color = model)) +
+  geom_density(alpha = 0.3, size = 1) +
+  labs(
+    title = expression("Posterior distributions of " ~ alpha[0]),
+    x = expression(alpha[0]),
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 18) +
+  theme(legend.position = "top", plot.title = element_text(face = "bold"))
+
+## posterior predictive density for r_rep
+rrep_B2 <- draws_B2 %>%
+  dplyr::select(starts_with("r_rep")) %>%
+  tidyr::pivot_longer(everything(), values_to = "r_rep") %>%
+  dplyr::mutate(model = "Model B2 (Outbreak-prone)")
+
+rrep_D <- draws_D %>%
+  dplyr::select(starts_with("r_rep")) %>%
+  tidyr::pivot_longer(everything(), values_to = "r_rep") %>%
+  dplyr::mutate(model = "Model D (Endemic)")
+
+## combine
+set.seed(123)
+rrep_combined <- bind_rows(rrep_B2, rrep_D) %>%
+  sample_n(min(5000, nrow(.)))  ## limit to 5000 draws
+
+p_rrep <- ggplot(rrep_combined, aes(x = r_rep, fill = model, color = model)) +
+  geom_density(alpha = 0.3, size = 1) +
+  labs(
+    title = "Posterior predictive densities for log-ratios",
+    x = "Predicted log-ratio (r_rep)",
+    y = "Density"
+  ) +
+  theme_minimal(base_size = 18) +
+  theme(legend.position = "top")
+
+## plots
+combined_plot <- p_alpha0 / p_rrep + 
+  plot_annotation(title = "")
+
+combined_plot
+
+```

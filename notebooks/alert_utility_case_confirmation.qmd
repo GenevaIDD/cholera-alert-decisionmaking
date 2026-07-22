@@ -1,0 +1,1987 @@
+---
+title: "Alert Utility Case Confirmation"
+format:
+  html:
+    toc: true
+    toc-depth: 4
+    number-sections: true
+    number-depth: 4
+    code-fold: true
+    embed-resources: true
+    theme:
+      - custom.scss
+params:
+  testing: false
+execute:
+  warning: false
+message: false
+cache: false
+---
+
+```{r}
+#| label: pkg-reinstall
+#| echo: false
+
+# detach("package:OutbreakExtractR", unload=TRUE)
+# devtools::document("../OutbreakExtractR")
+# install.packages("../OutbreakExtractR", type="source", repos=NULL)
+# params <- list(testing=FALSE)
+```
+
+```{r}
+#| label: setup
+#| echo: false
+
+## Load necessary libraries
+library(OutbreakExtractR)
+library(tidyverse)
+library(scales)
+library(sf)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(data.table)
+library(patchwork)
+library(ggpubr)
+library(purrr)
+library(stringr)
+
+
+new_dpath <- "../../main_ecl_dec2024/outputs"
+plot_path <- paste0(new_dpath, "/exploratory")
+pre_path <- "../../main_ecl_dec2024/inputs/"
+
+testing <- params$testing ## process the testing dataset or full evaluation of outbreaks
+test_cntry <- if(testing){"COD"}
+cCh_threshold <- 5
+
+## set parameters for reading files
+evalperiod_code <- "ew52"
+delayperiod_code <- "dw4" ## delay period for base analyses
+ag_nweeks_code <- "nweeks8"
+```
+
+Updated `r Sys.Date()`
+
+`r paste("Testing is", testing, ifelse(testing, paste0("with test country ", test_cntry, "."), "so results are for the full dataset."))`
+
+Alertgroup `r ag_nweeks_code`; Delay period `r delayperiod_code`; Evaluation period `r evalperiod_code`
+
+```{css classDummyTable, echo=FALSE}
+
+.dummyTable .table thead {
+  visibility: collapse;
+}
+.dummyTable .table tbody {
+  visibility: collapse;
+}
+.dummyTable .table {
+  border-collapse: inherit;
+  padding-bottom: none;
+}
+.dummyTable .table.table.table-sm.table-striped.small {
+  margin: auto;
+}
+```
+
+```{r}
+#| label: funcs-reactable-template
+#| echo: false
+
+#' @description Generic function to prepare reactable
+#' @param print_table dataframe ready to be printed
+#' @param col_names character vector of column names
+#' @returns reactable
+reactable_template <- function(print_table, col_names){
+  reactable::reactable(print_table,
+                       columns = col_names,
+                       style = list(fontFamily = "sans-serif"),
+                       highlight = TRUE,
+                       striped = TRUE,
+                       compact = TRUE,
+                       filterable = TRUE,
+                       defaultPageSize = 20
+  )
+}
+```
+
+```{r}
+#| label: utility_functions
+#| echo: false
+
+quibble2 <- function(colname, q = c(0.025, 0.25, 0.5, 0.75, 0.975)) {
+  tibble("{{ colname }}_q" := paste0("q", stringr::str_remove(as.character(q), "0.")), "{{ colname }}" := quantile(colname, q, na.rm = TRUE))
+}
+
+prepare_fig_dat <- function(df){
+  OutbreakExtractR::label_alerts_short(df, is_ordered = TRUE) %>%
+  dplyr::mutate(alert_lab = forcats::fct_rev(alert_lab)) %>%
+  OutbreakExtractR::label_alerttypes()
+}
+
+```
+
+
+```{r}
+#| label: load-data
+#| echo: false
+
+## Set Parameters
+incl_trend_alerts <- FALSE ## we do not use trend-based alerts for this sensitivity analysis
+impact_thresh <- 300 ## outcome threshold for ppv, missed outbreaks, delay
+use_filtered_linked <- TRUE ## TRUE for dataset that CA cleaned
+which_setting <- "epidemic" ## endemic, epidemic, all
+
+## Read Data
+alerts <- readr::read_rds(paste0(new_dpath, "/alerts.rds"))
+ags <- readr::read_rds(paste0(new_dpath, "/alert_groups_", ag_nweeks_code, ".rds"))
+evalC <- readr::read_rds(paste0(new_dpath, "/evaluation_cases_", delayperiod_code, "_", evalperiod_code, ".rds"))
+
+if(use_filtered_linked){
+  linked <- readr::read_rds(paste0(new_dpath, "/filtered_linked_outbreaks_alert_groups_", ag_nweeks_code, ".rds"))
+} else{
+  linked <- readr::read_rds(paste0(new_dpath, "/linked_outbreaks_alert_groups_", ag_nweeks_code, ".rds"))
+}
+
+pre_extract <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction.rds"))
+pre_extract <- dplyr::mutate(pre_extract, pop_brk = cut(pop, breaks = c(0, 50000, 500000, max(pre_extract$pop)), labels = c("<50k", "[50k, 500k)", "\U2265 500k"), include.lowest=T, right=FALSE))
+
+```
+
+The following locations are include in this report: `r which_setting`
+
+```{r}
+#| label: clean-base-data
+#| echo: false
+
+keep_low_stringency <- function(df, low_stringency_threshold){
+  df <- df %>% OutbreakExtractR::add_alert_stringency() %>%
+  filter(alert_stringency %in% c(1:low_stringency_threshold)) ## keep only low stringency alerts
+  return(df)
+}
+
+alerts_cl <- OutbreakExtractR::add_pop3_adm_columns(alerts, pre_extract) %>%
+  OutbreakExtractR::add_country_column() %>%
+  OutbreakExtractR::filter_ms_data(which_setting = which_setting) %>%
+  filter(alert_type != "trend") %>%
+  keep_low_stringency(low_stringency_threshold = 5)
+
+ags_cl <- OutbreakExtractR::add_pop3_adm_columns(ags, pre_extract) %>%
+  OutbreakExtractR::add_country_column() %>%
+  OutbreakExtractR::filter_ms_data(which_setting = which_setting) %>%
+  filter(alert_type != "trend") %>%
+  keep_low_stringency(low_stringency_threshold = 5)
+
+evalC_cl <- OutbreakExtractR::add_pop3_adm_columns(evalC, pre_extract) %>%
+  OutbreakExtractR::add_alert_columns(alerts) %>%
+  OutbreakExtractR::filter_ms_data(which_setting = which_setting)%>%
+  filter(alert_type != "trend") %>%
+  keep_low_stringency(low_stringency_threshold = 5)
+
+```
+
+## Data availability for case confirmation 
+
+```{r}
+
+alerts_wo_trend <- alerts_cl %>%
+  filter(alert_type != "trend")
+
+## Using data.table to perform non-equi join where we join based on whether the TL is within 4 weeks of the alert TL
+a <- as.data.table(alerts_wo_trend)
+p <- as.data.table(pre_extract)
+
+a[, TL := as.Date(TL)]
+p[, TL := as.Date(TL)]
+
+## define temporal window
+a[, TL_start := TL - 21L]   ## TL - 3 weeks
+a[, TL_end   := TL]         ## TL (alert week)
+
+## Non-equi join
+result <- p[
+  a,
+  on = .(location,
+         TL >= TL_start,
+         TL <= TL_end),
+  allow.cartesian = TRUE
+][,
+  .(total_confirmed_cases = sum(cCh, na.rm = TRUE),
+    total_suspected_cases = sum(sCh, na.rm = TRUE)),
+  by = alert_id
+]
+
+a_with_counts <- a[result, on = .(alert_id)] %>%
+  as.data.frame() %>%
+  prepare_fig_dat()
+
+a_with_counts <- a_with_counts %>%
+  mutate(confirmed_prop = ifelse(total_suspected_cases > 0,
+                                 total_confirmed_cases / total_suspected_cases,
+                                 NA),
+         unconfirmed_prop = 1-confirmed_prop)
+
+## important: here we filter the dataset to only keep the alerts that have total confirmed cases during the alert period according to the threshold we want to explore
+alerts_w_cCh_threshold <- a_with_counts %>%
+  select(alert_id, alert_lab, total_confirmed_cases, total_suspected_cases, confirmed_prop, location) %>%
+  filter(total_confirmed_cases >= cCh_threshold)
+
+message(paste0("the number of alerts in the unfiltered dataset is ",length(a_with_counts$alert_id)))
+
+message(paste0("the number of alerts in the filtered dataset with cCh threshold =  ", cCh_threshold, " is " ,length(alerts_w_cCh_threshold$alert_id)))
+
+
+```
+
+The number of alerts in the unfiltered dataset is `r length(a_with_counts$alert_id)`
+
+The number of alerts in the filtered dataset with cCh threshold = `r cCh_threshold` is `r length(alerts_w_cCh_threshold$alert_id)`
+
+```{r, fig.width=12}
+
+# a barchart per type showing the proportion per alert_number (bars side-by-side)
+
+# Helper: coerce alert_number to a factor for nicer plotting order when appropriate
+if (!"alert_number" %in% names(a_with_counts)) stop("a_with_counts must contain column 'alert_number'")
+
+a_with_counts <- a_with_counts %>%
+  mutate(alert_lab = as.factor(alert_lab))
+
+alert_types <- unique(a_with_counts$alert_type)
+
+barchart_plots <- list()
+
+for (atype in alert_types) {
+  df_prop <- a_with_counts %>%
+    filter(alert_type == atype) %>%
+    group_by(alert_lab) %>%
+    summarise(
+      n_alerts = n(),
+      n_with_confirmed = sum((total_confirmed_cases > 0), na.rm = TRUE),
+      prop_with_confirmed = ifelse(n_alerts > 0, n_with_confirmed / n_alerts, NA_real_)
+    ) %>%
+    ungroup()
+
+  if (nrow(df_prop) == 0) next
+
+  p_bar <- ggplot(df_prop, aes(x = alert_lab, y = prop_with_confirmed)) +
+    geom_col(width = 0.7) +
+    scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+    labs(
+      title = paste0("Proportion of Alerts with \u2265 1 Confirmed Case — Alert Type: ", atype),
+      x = "alert_number",
+      y = "Proportion with at least one confirmed case"
+    ) +
+    theme_minimal()
+
+  print(p_bar)
+  barchart_plots[[atype]] <- p_bar
+  
+  df_raw <- df_prop %>%
+    select(alert_lab, n_alerts, n_with_confirmed) %>%
+    pivot_longer(cols = c(n_alerts, n_with_confirmed),
+                 names_to = "metric",
+                 values_to = "count")
+
+  p_bar_raw <- ggplot(df_raw,
+                      aes(x = alert_lab,
+                          y = count,
+                          fill = metric)) +
+    geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+    labs(
+      title = paste0("Raw Alert Counts — Alert Type: ", atype),
+      x = "alert_number",
+      y = "Count",
+      fill = "Metric"
+    ) +
+    scale_fill_manual(
+      values = c("n_alerts" = "#1f78b4",
+                 "n_with_confirmed" = "#33a02c"),
+      labels = c(
+        n_alerts = "Total Alerts",
+        n_with_confirmed = "Alerts with ≥1 Confirmed Case"
+      )
+    ) +
+    theme_minimal()
+
+  print(p_bar_raw)
+  barchart_plots[[paste0(atype, "_raw")]] <- p_bar_raw
+
+}
+
+## summary table 
+summary_table <- a_with_counts %>%
+  group_by(alert_type, alert_lab) %>%
+  summarise(
+    n_alerts = n(),
+    n_with_confirmed = sum((total_confirmed_cases > 0), na.rm = TRUE),
+    prop_with_confirmed = ifelse(n_alerts > 0, n_with_confirmed / n_alerts, NA_real_)
+  ) %>%
+  ungroup()
+
+print(summary_table)
+
+
+
+```
+
+### Proportion of alerts that have (not NA) case confirmation data for at least one week in the alert period and proportion of alerts that have (not NA) case confirmation data for all weeks in the alert period
+
+```{r}
+alerts_wo_trend2 <- alerts_cl %>%
+  filter(alert_type != "trend") %>%
+  prepare_fig_dat()
+
+a_dt <- as.data.table(alerts_wo_trend2)
+p_dt <- as.data.table(pre_extract)
+a_dt[, TL_alert := as.Date(TL)]
+p_dt[, TL_p := as.Date(TL)]
+p_dt[, TL := NULL]
+
+## defining the temporal window (alert week + 3 weeks prior)
+a_dt[, TL_start := TL_alert - 21L]   ## 21 days before
+a_dt[, TL_end   := TL_alert]         ## alert week
+
+joined <- p_dt[
+  a_dt,
+  on = .(
+    location,
+    TL_p >= TL_start,
+    TL_p <= TL_end
+  ),
+  allow.cartesian = TRUE
+]
+
+alert_week_summary <- joined[, .(
+  n_weeks_matched   = .N,                  
+  n_nonNA_weeks     = sum(!is.na(cCh)),     ## how many have non-NA cCh
+  has_atleast1      = sum(!is.na(cCh)) > 0, ## TRUE if ≥1 week non-NA
+  has_all4          = sum(!is.na(cCh)) == 4 ## TRUE if all 4 weeks non-NA
+), by = alert_id]
+
+a_combined <- a_dt[alert_week_summary, on = .(alert_id)] %>%
+  as.data.frame() %>%
+  mutate(alert_lab = as.factor(alert_lab))
+
+summary_prop <- a_combined %>%
+  group_by(alert_type, alert_lab) %>%
+  summarise(
+    n_alerts = n(),
+    n_atleast1 = sum(has_atleast1, na.rm = TRUE),
+    n_all4     = sum(has_all4, na.rm = TRUE),
+
+    prop_atleast1 = n_atleast1 / n_alerts,
+    prop_all4     = n_all4     / n_alerts
+  ) %>%
+  ungroup()
+
+print(summary_prop)
+
+
+alert_types <- unique(a_combined$alert_type)
+barchart_atleast1 <- list()
+barchart_all4     <- list()
+
+for (atype in alert_types) {
+  
+  df_plot <- summary_prop %>% filter(alert_type == atype)
+  if (nrow(df_plot) == 0) next
+  
+  p1 <- ggplot(df_plot, aes(x = alert_lab, y = prop_atleast1)) +
+    geom_col(width = 0.7) +
+    scale_y_continuous(labels = percent_format(accuracy = 1),
+                       limits = c(0,1)) +
+    labs(
+      title = paste0("Prop. Alerts with ≥1 Week non-NA cCh, Type: ", atype),
+      x = "alert definition", y = "Proportion (≥1 week non-NA)"
+    ) +
+    theme_minimal()
+  
+  print(p1)
+  barchart_atleast1[[atype]] <- p1
+  
+  p2 <- ggplot(df_plot, aes(x = alert_lab, y = prop_all4)) +
+    geom_col(width = 0.7) +
+    scale_y_continuous(labels = percent_format(accuracy = 1),
+                       limits = c(0,1)) +
+    labs(
+      title = paste0("Prop. Alerts with All 4 Weeks non-NA cCh, Type: ", atype),
+      x = "alert definition", y = "Proportion (all 4 weeks non-NA)"
+    ) +
+    theme_minimal()
+  
+  print(p2)
+  barchart_all4[[atype]] <- p2
+  
+  df_raw <- df_plot %>%
+    select(alert_lab, n_alerts, n_atleast1, n_all4) %>%
+    pivot_longer(
+      cols = c(n_alerts, n_atleast1, n_all4),
+      names_to = "metric",
+      values_to = "count"
+    )
+
+  p_raw <- ggplot(df_raw, aes(x = alert_lab, y = count, fill = metric)) +
+    geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+    labs(
+      title = paste0("Raw Alert Counts, Type: ", atype),
+      x = "alert definition",
+      y = "Count",
+      fill = "Metric"
+    ) +
+    scale_fill_manual(
+      values = c(
+        n_alerts   = "#1f78b4",
+        n_atleast1 = "#33a02c",
+        n_all4     = "#e31a1c"
+      ),
+      labels = c(
+        n_alerts   = "Total Alerts",
+        n_atleast1 = "Alerts w/ ≥1 non-NA week",
+        n_all4     = "Alerts w/ all 4 non-NA weeks"
+      )
+    ) +
+    theme_minimal()
+
+  print(p_raw)
+
+}
+
+
+```
+### Proportion of outbreaks that have (not NA) case confirmation data for at least one week in the alert period and proportion of outbreaks that have (not NA) case confirmation data for all weeks in the alert period
+
+```{r}
+
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+l_dt <- as.data.table(linked)
+
+outbreak_windows <- l_dt[, .(
+  location       = first(location),
+  outbreak_start = first(outbreak_start),
+  outbreak_end   = first(outbreak_end)
+), by = outbreak_UID]
+
+p_dt <- as.data.table(pre_extract)
+p_dt[, TL_p := as.Date(TL)]
+p_dt[, TL := NULL]
+
+
+joined_outbreak <- p_dt[
+  outbreak_windows,
+  on = .(
+    location,
+    TL_p >= outbreak_start,
+    TL_p <= outbreak_end
+  ),
+  allow.cartesian = TRUE
+]
+
+outbreak_summary <- joined_outbreak[, .(
+  n_weeks_matched = .N,                ## number of outbreak weeks found in preoutbreak time series
+  n_nonNA_weeks   = sum(!is.na(cCh)),  ## how many weeks have non-NA cCh
+  has_atleast1    = sum(!is.na(cCh)) > 0,
+  has_all_weeks   = sum(!is.na(cCh)) == .N
+), by = outbreak_UID]
+
+outbreak_combined <- outbreak_windows[outbreak_summary, on = "outbreak_UID"]
+
+linked_outbreak <- linked %>%
+  select(outbreak_UID, linkage, location) %>%
+  distinct() %>%
+  inner_join(outbreak_combined, by = "outbreak_UID")
+
+summary_overall <- outbreak_combined %>%
+  summarise(
+    n_outbreaks   = n(),
+    prop_atleast1 = mean(has_atleast1, na.rm = TRUE),
+    prop_all      = mean(has_all_weeks, na.rm = TRUE)
+  )
+
+print(summary_overall)
+
+ggplot(summary_overall, aes(x = "all outbreaks", y = prop_atleast1)) +
+  geom_col(width = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0,1)) +
+  labs(
+    title = "Proportion of Outbreaks with ≥1 Week non-NA cCh",
+    x = "",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+
+ggplot(summary_overall, aes(x = "all outbreaks", y = prop_all)) +
+  geom_col(width = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0,1)) +
+  labs(
+    title = "Proportion of Outbreaks with All Weeks non-NA cCh",
+    x = "",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+
+summary_raw <- outbreak_combined %>% summarise( n_outbreaks = n(), 
+                                                n_with_atleast1 = sum(has_atleast1, na.rm = TRUE),
+                                                n_with_all = sum(has_all_weeks, na.rm = TRUE) ) %>%
+  tidyr::pivot_longer( cols = everything(), names_to = "metric", values_to = "count" ) 
+
+
+ggplot(summary_raw, aes(x = metric, y = count, fill = metric)) +
+  geom_col(width = 0.6) +
+  labs( title = "Raw Outbreak Counts (overall)", x = "", y = "Count", fill = "Metric" ) +
+  scale_fill_manual(values = c( n_outbreaks = "#1f78b4", n_with_atleast1 = "#33a02c", n_with_all = "#e31a1c" ), labels = c(n_outbreaks = "Total outbreaks", n_with_atleast1 = "Outbreaks w/ ≥1 non-NA week",                                                                                                              n_with_all = "Outbreaks w/ all weeks non-NA" )) +
+  theme_minimal()
+
+## outbreak data
+l_dt <- as.data.table(linked)
+
+outbreak_windows <- l_dt[, .(
+  location       = first(location),
+  outbreak_start = first(outbreak_start),
+  outbreak_end   = first(outbreak_end)
+), by = outbreak_UID]
+
+
+p_dt <- as.data.table(pre_extract)
+p_dt[, TL_p := as.Date(TL)]
+p_dt[, TL := NULL]
+
+
+joined_outbreak <- p_dt[
+  outbreak_windows,
+  on = .(
+    location,
+    TL_p >= outbreak_start,
+    TL_p <= outbreak_end
+  ),
+  allow.cartesian = TRUE
+]
+
+outbreak_summary <- joined_outbreak[, .(
+  n_weeks_matched = .N,
+  n_nonNA_weeks   = sum(!is.na(cCh)),
+  has_atleast1    = sum(!is.na(cCh)) > 0,
+  has_all_weeks   = sum(!is.na(cCh)) == .N,
+  total_cCh       = sum(cCh, na.rm = TRUE)   # <-- key addition
+), by = outbreak_UID]
+
+
+outbreak_combined <- outbreak_windows[outbreak_summary, on = "outbreak_UID"]
+
+linked_outbreak <- linked %>%
+  select(outbreak_UID, linkage, location) %>%
+  distinct() %>%
+  inner_join(outbreak_combined, by = "outbreak_UID")
+
+outbreak_combined_filtered <- outbreak_combined %>%
+  #filter(total_cCh >= cCh_threshold) %>%
+  mutate(outbreak_UID = paste0(location, "_", outbreak_start, "_", outbreak_end))
+
+summary_overall <- outbreak_combined_filtered %>%
+  summarise(
+    n_outbreaks   = n(),
+    prop_atleast1 = mean(has_atleast1, na.rm = TRUE),
+    prop_all      = mean(has_all_weeks, na.rm = TRUE)
+  )
+
+print(summary_overall)
+
+
+ggplot(summary_overall, aes(x = "filtered outbreaks", y = prop_atleast1)) +
+  geom_col(width = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0,1)) +
+  labs(
+    title = paste0(
+      "Proportion of Outbreaks with ≥1 Week non-NA cCh",
+      "\n(Filter: total cCh ≥ ", cCh_threshold, ")"
+    ),
+    x = "",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+
+
+ggplot(summary_overall, aes(x = "filtered outbreaks", y = prop_all)) +
+  geom_col(width = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0,1)) +
+  labs(
+    title = paste0(
+      "Proportion of Outbreaks with All Weeks non-NA cCh",
+      "\n(Filter: total cCh ≥ ", cCh_threshold, ")"
+    ),
+    x = "",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+
+summary_raw <- outbreak_combined_filtered %>%
+  summarise(
+    n_outbreaks      = n(),
+    n_with_atleast1  = sum(has_atleast1, na.rm = TRUE),
+    n_with_all       = sum(has_all_weeks, na.rm = TRUE)
+  ) %>%
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to = "metric",
+    values_to = "count"
+  )
+
+ggplot(summary_raw, aes(x = metric, y = count, fill = metric)) +
+  geom_col(width = 0.6) +
+  labs(
+    title = paste0("Raw Outbreak Counts (Filtered)\nFilter: total cCh ≥ ", cCh_threshold),
+    x = "",
+    y = "Count",
+    fill = "Metric"
+  ) +
+  scale_fill_manual(
+    values = c(
+      n_outbreaks     = "#1f78b4",
+      n_with_atleast1 = "#33a02c",
+      n_with_all      = "#e31a1c"
+    ),
+    labels = c(
+      n_outbreaks     = "Total outbreaks (filtered)",
+      n_with_atleast1 = "Outbreaks w/ ≥1 non-NA week",
+      n_with_all      = "Outbreaks w/ all weeks non-NA"
+    )
+  ) +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+#| label: prepare-linked-data
+#| echo: true
+
+## subset to outbreaks exceeding a threshold
+print(paste(impact_thresh, "suspected cases is the outbreak filtering threshold"))
+
+if(use_filtered_linked){
+
+  linked_cl <- OutbreakExtractR::add_pop3_adm_columns_outbreak(linked, pre_extract) %>% ## N.B. function changes the outbreak_UID separators to underscores
+    OutbreakExtractR::add_country_column() %>%
+    OutbreakExtractR::add_alert_columns_outbreak(alerts) %>%
+    OutbreakExtractR::filter_ms_data(which_setting = which_setting) 
+
+  ## checks
+  print("Number of outbreak_UIDs missing at least one of 24 alert definitions (linked)")
+  linked %>% group_by(outbreak_UID) %>% count() %>% filter(n<24) %>% nrow
+  print("Number of outbreak_UIDs missing at least one of 24 alert definitions")
+  linked_cl %>% group_by(outbreak_UID) %>% count() %>% filter(n<24) %>% nrow
+
+} else{
+  message("Unfiltered links to outbreak data were used. Filtering to one alert definition per outbreak via automated selection.")
+
+  linked_cl_tmp <- OutbreakExtractR::add_pop3_adm_columns_outbreak(linked, pre_extract) %>%
+    OutbreakExtractR::add_country_column() %>%
+    OutbreakExtractR::add_alert_columns_outbreak(alerts) %>%
+    OutbreakExtractR::filter_ms_data(which_setting = which_setting) 
+
+  linked_cl_1row <- dplyr::group_by(linked_cl_tmp, outbreak_UID, alert_number) %>%
+    dplyr::count() %>%
+    dplyr::filter(n <= 1) %>%
+    dplyr::ungroup()
+  linked_cl_mrow <- dplyr::group_by(linked_cl_tmp, outbreak_UID, alert_number) %>%
+    dplyr::count() %>%
+    dplyr::filter(n > 1) %>%
+    dplyr::ungroup()
+
+  ## clean outbreak-alert linkages with multiple linkage options
+  clean_mrow_linkages <- function(linked_mrow_dat, linked_full_dat, i){
+    id <- linked_mrow_dat[i,]$outbreak_UID
+    alert_num <- linked_mrow_dat[i,]$alert_number
+
+    tmp <- dplyr::filter(linked_full_dat, outbreak_UID == id & alert_number == alert_num)
+
+    if ("overlap" %in% tmp$linkage){
+      tmp2 <- dplyr::mutate(tmp, keep = dplyr::if_else(linkage == "overlap", TRUE, FALSE))
+    } else if ("closest before" %in% tmp$linkage){
+      tmp2 <- dplyr::mutate(tmp, keep = dplyr::if_else(linkage == "closest before", TRUE, FALSE))
+    }
+
+    rc <- dplyr::filter(tmp2, keep) %>% dplyr::select(-keep)
+    if(nrow(rc) != 1){
+      stop("More than 1 row was returned")
+    }
+    return(rc)
+  }
+
+  linked_mrow_singles <- 1:nrow(linked_cl_mrow) |>
+    purrr::map(\(x) clean_mrow_linkages(linked_cl_mrow, linked_cl_tmp, i = x)) %>%
+    purrr::list_rbind() %>%
+    dplyr::ungroup()
+
+  linked_1rows <- dplyr::left_join(dplyr::select(linked_cl_1row, outbreak_UID, alert_number), linked_cl_tmp, by = c("outbreak_UID", "alert_number"))
+
+  ## checks
+  print("Number of outbreak UIDs in pre and post cleaning are the same")
+  nrow(linked_mrow_singles) + nrow(linked_1rows) == nrow(dplyr::distinct(linked_cl_tmp, outbreak_UID, alert_number))
+
+  linked_cl <- dplyr::bind_rows(linked_1rows, linked_mrow_singles) %>%
+  filter(alert_type != "trend") ## one linkage per alert def - outbreak
+}
+
+linked_cl_large <- dplyr::filter(linked_cl, total_sCh > impact_thresh) %>%
+  ## only keep outbreaks above impact threshold
+  filter(alert_type != "trend")
+
+## filtered outbreaks for cCh VERSION 2
+linked_cl_large_filtered <- linked_cl_large %>%
+  keep_low_stringency(low_stringency_threshold = 5) %>%
+  ## set alert fields to NA / FALSE if alert_id not in alerts_w_cCh_threshold
+  mutate(
+    is_triggered = if_else(alert_id %in% alerts_w_cCh_threshold$alert_id,
+                           is_triggered, FALSE),
+    alert_id = if_else(alert_id %in% alerts_w_cCh_threshold$alert_id,
+                        alert_id, NA_character_),
+    alert_group_start = if_else(alert_id %in% alerts_w_cCh_threshold$alert_id,
+                                alert_group_start, as.Date(NA)),
+    alert_group_end = if_else(alert_id %in% alerts_w_cCh_threshold$alert_id,
+                              alert_group_end, as.Date(NA)),
+    linkage = if_else(alert_id %in% alerts_w_cCh_threshold$alert_id,
+                      linkage, NA_character_)
+  )
+
+```
+
+Identify proportion of target population as \>1 year olds by country according to UNWPP2024 in the alert year.
+
+```{r}
+#| label: prep_target_pop
+#| echo: false
+
+library(wpp2024)
+library(countrycode)
+data(popAge1dt)
+
+iso3_uq <- sort(unique(evalC_cl$country))
+codes <- dplyr::select(countrycode::codelist, iso3c, un.name.en) %>%
+  dplyr::filter(iso3c %in% iso3_uq) %>%
+  dplyr::mutate(un.name.en = dplyr::case_when(iso3c == "CIV" ~ "Cote d'Ivoire",
+                              .default = un.name.en))
+
+iso3_targetpop <- popAge1dt %>%
+  dplyr::mutate(target_pop = dplyr::if_else(age != 0, pop, 0)) %>%
+  dplyr::group_by(name, year) %>%
+  dplyr::summarise(target_pop = sum(target_pop), total_pop = sum(pop)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(prop_targeted = round(target_pop/total_pop, 2)) %>%
+  dplyr::right_join(codes, by = c("name" = "un.name.en")) %>%
+  dplyr::relocate(iso3c, .after = "name") %>%
+  dplyr::rename(country = iso3c)
+
+targetpop_cl <- dplyr::select(iso3_targetpop, country, year, prop_targeted)
+
+merge_prop_targeted <- dplyr::distinct(ags_cl, alert_id, TL_first_alert, country) %>%
+  dplyr::mutate(TL_year = lubridate::year(TL_first_alert)) %>%
+  dplyr::left_join(targetpop_cl, by = c("country", "TL_year" = "year")) %>%
+  dplyr::select(alert_id, prop_targeted)
+
+```
+
+# Alert utility
+
+1.  Alerts preceding highest potential impact
+2.  Alerts preceding highest potential efficiency
+3.  Alerts with high PPV (outcomes with \>`r impact_thresh` cases)
+4.  Proportion of outbreaks with \>`r impact_thresh` cases that were missed
+5.  Delay from outbreak start for outbreaks \>`r impact_thresh` cases
+
+
+## Dimensions of alert utility
+
+```{r}
+#| label: prep_underlying_data
+#| echo: false
+
+### impact and efficiency ###
+prep_impact_eff_dat <- dplyr::left_join(evalC_cl, merge_prop_targeted, by = c("alert_id")) %>%
+  dplyr::rename(impact = total_sCh) %>%
+  dplyr::mutate(eff = impact / (prop_targeted*pop) * 1000)
+
+means_impact_eff_dat <- prep_impact_eff_dat %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(impact_mean = mean(impact), eff_mean = mean(eff)) %>%
+  dplyr::ungroup()
+
+### ppv ###
+prep_ppv_dat <- dplyr::mutate(evalC_cl, true_positives := dplyr::if_else(total_sCh > impact_thresh, TRUE, FALSE))
+
+### missed outbreaks and delayed detection ###
+prep_missed_delay_dat <- linked_cl_large %>%
+  dplyr::mutate(delay = as.numeric(alert_group_start-outbreak_start, units = "weeks"))
+
+means_delay_dat <- prep_missed_delay_dat %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(delay_mean = mean(delay, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+n_outbreaks <- linked_cl_large %>%
+  dplyr::distinct(outbreak_UID, pop_brk) %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::summarise(n_outbreaks = n())
+
+sum(n_outbreaks$n_outbreaks) == length(unique(linked_cl_large$outbreak_UID)) ## total number of outbreaks
+
+### important: missed outbreaks and delayed detection for the cCh threshold, matching outbreaks to alert locations above the cCh threshold ###   
+linked_cl_large_cCh <- linked_cl_large_filtered %>%
+  filter(location %in% alerts_w_cCh_threshold$location)
+
+prep_missed_delay_dat_cCh <- linked_cl_large_cCh %>%
+  dplyr::mutate(delay = as.numeric(alert_group_start-outbreak_start, units = "weeks"))
+
+means_delay_dat_cCh <- prep_missed_delay_dat_cCh %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(delay_mean = mean(delay, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+n_outbreaks_cCh <- linked_cl_large_cCh %>%
+  dplyr::distinct(outbreak_UID, pop_brk) %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::summarise(n_outbreaks = n())
+
+sum(n_outbreaks_cCh$n_outbreaks) == length(unique(linked_cl_large_cCh$outbreak_UID)) ## total number of outbreaks
+
+```
+
+## Sensitivity Analysis for the specific threshold
+
+```{r}
+#| label: prep_underlying_data_cCh
+#| echo: false
+
+### impact and efficiency ###
+prep_impact_eff_dat_cCh <- dplyr::left_join(evalC_cl, merge_prop_targeted, by = c("alert_id")) %>%
+  dplyr::rename(impact = total_sCh) %>%
+  dplyr::mutate(eff = impact / (prop_targeted*pop) * 1000) %>%
+  filter(alert_id %in% alerts_w_cCh_threshold$alert_id)
+
+means_impact_eff_dat_cCh <- prep_impact_eff_dat_cCh %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(impact_mean = mean(impact), eff_mean = mean(eff)) %>%
+  dplyr::ungroup()
+
+### ppv ###
+evalC_cl_cCh <- evalC_cl %>% filter(alert_id %in% alerts_w_cCh_threshold$alert_id)
+prep_ppv_dat_cCh <- dplyr::mutate(evalC_cl_cCh, true_positives := dplyr::if_else(total_sCh > impact_thresh, TRUE, FALSE))
+
+### missed outbreaks and delayed detection ###
+prep_missed_delay_dat_cCh <- linked_cl_large_cCh %>%
+  dplyr::mutate(delay = as.numeric(alert_group_start-outbreak_start, units = "weeks"))
+
+means_delay_dat_cCh <- prep_missed_delay_dat_cCh %>%
+  dplyr::group_by(alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(delay_mean = mean(delay, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+n_outbreaks_cCh <- linked_cl_large_cCh %>%
+  dplyr::distinct(outbreak_UID, pop_brk) %>%
+  dplyr::group_by(pop_brk) %>%
+  dplyr::summarise(n_outbreaks = n())
+
+sum(n_outbreaks_cCh$n_outbreaks) == length(unique(linked_cl_large_cCh$outbreak_UID)) ## total number of outbreaks
+
+```
+
+
+```{r}
+#| label: prep_fig_data
+#| echo: false
+
+fig_impact_dat <- dplyr::group_by(prep_impact_eff_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(impact)) %>%
+  tidyr::pivot_wider(names_from = impact_q, names_glue = "{.value}_{impact_q}", values_from = impact) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_dat, alert_number, alert_type, pop_brk, impact_mean), by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_eff_dat <- dplyr::group_by(prep_impact_eff_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(eff)) %>%
+  tidyr::pivot_wider(names_from = eff_q, names_glue = "{.value}_{eff_q}", values_from = eff) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_dat, alert_number, alert_type, pop_brk, eff_mean), by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_ppv_dat <- dplyr::group_by(prep_ppv_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(alerts = n(), true_positives = sum(true_positives), ppv = round(true_positives/alerts, 2)) %>%
+  prepare_fig_dat()
+
+fig_missed_dat <- dplyr::group_by(prep_missed_delay_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(n_detected = sum(is_triggered)) %>%
+  dplyr::left_join(n_outbreaks, by = c("pop_brk")) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(n_missed = n_outbreaks - n_detected,
+                missed_prop = n_missed/n_outbreaks) %>%
+  prepare_fig_dat()
+
+fig_delay_dat <- dplyr::group_by(prep_missed_delay_dat, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(delay)) %>%
+  dplyr::ungroup() %>%
+  tidyr::pivot_wider(names_from = delay_q, names_glue = "{.value}_{delay_q}", values_from = delay) %>%
+  dplyr::full_join(means_delay_dat, by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_complete_dat <- dplyr::full_join(fig_impact_dat, fig_eff_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_ppv_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_missed_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_delay_dat, by = c("alert_number", "alert_type", "pop_brk", "alert_lab"))
+
+## 30 Oct save as file to compare epidemic/endemic locations and test for statistically significant differences
+add_setting_and_save <- function(df, name) {
+  df$which_setting <- which_setting
+  saveRDS(df, paste0(pre_path, name, which_setting, ".rds"))
+}
+
+add_setting_and_save(fig_complete_dat, "compare_significant_missed_ppv_chisquare_")
+
+fig_under_50k <- dplyr::filter(fig_complete_dat, pop_brk == "< 50k")
+fig_50k_500k <- dplyr::filter(fig_complete_dat, pop_brk == "[50k, 500k)")
+fig_over_500k <- dplyr::filter(fig_complete_dat, pop_brk == "\U2265 500k")
+
+```
+
+```{r}
+#| label: prep_fig_data_cCh
+#| echo: false
+
+fig_impact_dat_cCh <- dplyr::group_by(prep_impact_eff_dat_cCh, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(impact)) %>%
+  tidyr::pivot_wider(names_from = impact_q, names_glue = "{.value}_{impact_q}", values_from = impact) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_dat_cCh, alert_number, alert_type, pop_brk, impact_mean), by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_eff_dat_cCh <- dplyr::group_by(prep_impact_eff_dat_cCh, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(eff)) %>%
+  tidyr::pivot_wider(names_from = eff_q, names_glue = "{.value}_{eff_q}", values_from = eff) %>%
+  dplyr::full_join(dplyr::select(means_impact_eff_dat_cCh, alert_number, alert_type, pop_brk, eff_mean), by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_ppv_dat_cCh <- dplyr::group_by(prep_ppv_dat_cCh, alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(alerts = n(), true_positives = sum(true_positives), ppv = round(true_positives/alerts, 2)) %>%
+  prepare_fig_dat()
+
+fig_missed_dat_cCh <- dplyr::group_by(prep_missed_delay_dat_cCh, alert_number, alert_type, pop_brk) %>%
+  dplyr::summarise(n_detected = sum(is_triggered)) %>%
+  dplyr::left_join(n_outbreaks_cCh, by = c("pop_brk")) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(n_missed = n_outbreaks - n_detected,
+                missed_prop = n_missed/n_outbreaks) %>%
+  prepare_fig_dat()
+
+fig_delay_dat_cCh <- dplyr::group_by(prep_missed_delay_dat_cCh, alert_number, alert_type, pop_brk) %>%
+  dplyr::reframe(quibble2(delay)) %>%
+  dplyr::ungroup() %>%
+  tidyr::pivot_wider(names_from = delay_q, names_glue = "{.value}_{delay_q}", values_from = delay) %>%
+  dplyr::full_join(means_delay_dat_cCh, by = c("alert_number", "alert_type", "pop_brk")) %>%
+  prepare_fig_dat()
+
+fig_complete_dat_cCh <- dplyr::full_join(fig_impact_dat_cCh, fig_eff_dat_cCh, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_ppv_dat_cCh, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_missed_dat_cCh, by = c("alert_number", "alert_type", "pop_brk", "alert_lab")) %>%
+  dplyr::full_join(fig_delay_dat_cCh, by = c("alert_number", "alert_type", "pop_brk", "alert_lab"))
+
+add_setting_and_save(fig_complete_dat_cCh, paste0("compare_significant_missed_ppv_chisquare_cCh_", cCh_threshold, "_"))
+
+fig_under_50k_cCh <- dplyr::filter(fig_complete_dat_cCh, pop_brk == "< 50k")
+fig_50k_500k_cCh <- dplyr::filter(fig_complete_dat_cCh, pop_brk == "[50k, 500k)")
+fig_over_500k_cCh <- dplyr::filter(fig_complete_dat_cCh, pop_brk == "\U2265 500k")
+
+```
+
+```{r}
+#| label: func-figs
+#| echo: false
+
+impact_lineplot <- function(df, title_lab = "Impact", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, impact_total_mean = mean(impact_mean, na.rm = TRUE))
+  print(paste("Impact mean:", df_mean$impact_total_mean))
+
+  ggplot2::ggplot(df, aes(y = alert_lab)) +
+    geom_point(aes(x = impact_mean, colour = alert_type)) +
+    geom_point(aes(x = impact_q5, colour = alert_type), shape = "x", size = 4) +
+    geom_linerange(aes(xmin = impact_q25, xmax = impact_q75, colour = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = impact_total_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_colour_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Suspected Cases", labels = scales::label_number(scale = 0.001, suffix = "k")) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+
+eff_lineplot <- function(df, title_lab = "Efficiency", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, eff_total_mean = mean(eff_mean, na.rm = TRUE))
+  print(paste("Efficiency mean:", df_mean$eff_total_mean))
+
+  ggplot2::ggplot(df, aes(y = alert_lab)) +
+    geom_point(aes(x = eff_mean, colour = alert_type)) +
+    geom_point(aes(x = eff_q5, colour = alert_type), shape = "x", size = 4) +
+    geom_linerange(aes(xmin = eff_q25, xmax = eff_q75, colour = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = eff_total_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_colour_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Cases/1k target pop", labels = scales::label_number(big.mark = "", accuracy = 1), limits = c(0, max(df$eff_mean, na.rm = TRUE)*1.1)) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+
+ppv_barplot <- function(df, title_lab = "PPV", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, ppv_mean = mean(ppv, na.rm = TRUE))
+  print(paste("PPV mean:", df_mean$ppv_mean))
+
+  ggplot2::ggplot(df, aes(x = ppv, y = alert_lab)) +
+    geom_col(aes(fill = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = ppv_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_x_continuous("PPV", labels = scales::label_number(accuracy = 0.1), breaks = seq(0, 1, by = 0.2), limits = c(0, 1)) +
+    scale_y_discrete("Alert Type") +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), axis.ticks.y = element_blank(), axis.text.y = element_blank(), plot.margin = unit(c(1,1,1,3), "mm")) +
+    ggtitle(title_lab)
+}
+
+missed_barplot <- function(df, title_lab = "Missed", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, missed_mean = mean(missed_prop, na.rm = TRUE))
+  print(paste("Missed mean:", df_mean$missed_mean))
+
+  ggplot2::ggplot(df, aes(x = missed_prop, y = alert_lab)) +
+    geom_col(aes(fill = alert_type)) +
+    geom_vline(data = df_mean, aes(xintercept = missed_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Prop of outbreaks", labels = scales::label_number(accuracy = 0.1), breaks = seq(0, 1, by = 0.2), limits = c(0, 1)) +
+    theme_bw() +
+    theme(legend.position = "none", axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+
+delay_lineplot <- function(df, title_lab = "Delay", col_pal = "Dark2"){
+  df_mean <- dplyr::summarise(df, delay_total_mean = mean(delay_mean, na.rm = TRUE))
+  print(paste("Delay mean:", df_mean$delay_total_mean))
+
+  ggplot2::ggplot(df, aes(y = alert_lab)) +
+    geom_point(aes(x = delay_mean, colour = alert_type)) +
+    geom_point(aes(x = delay_q5, colour = alert_type), shape = "x", size = 4) +
+    geom_vline(data = df_mean, aes(xintercept = delay_total_mean), colour = "black", linetype = 2, alpha = 0.7) +
+    geom_linerange(aes(xmin = delay_q25, xmax = delay_q75, colour = alert_type)) +
+    scale_colour_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Weeks of delay", labels = scales::label_number()) +
+    theme_bw() +
+    theme(legend.position = "right", axis.title.y = element_blank(), axis.text.y = element_blank(), axis.ticks.y = element_blank(), plot.margin = unit(c(1,1,1,1), "mm")) +
+    ggtitle(title_lab)
+}
+```
+
+
+
+```{r}
+#| label: boxplots-and-barcharts-mainpop
+#| echo: true
+#| fig.width: 10
+
+col_pal <- "Dark2"
+
+fig_impact_raw <- prep_impact_eff_dat %>% prepare_fig_dat()
+fig_eff_raw    <- prep_impact_eff_dat %>% prepare_fig_dat()
+fig_delay_raw  <- prep_missed_delay_dat %>% prepare_fig_dat()
+
+## 30 Oct save as file to compare epidemic/endemic locations and test for statistically significant differences
+add_setting_and_save(fig_impact_raw, "compare_significant_impact_testmeans_")
+add_setting_and_save(fig_eff_raw, "compare_significant_efficiency_testmeans_")
+add_setting_and_save(fig_delay_raw, "compare_significant_delay_testmeans_")
+
+pop_groups <- c("< 50k", "[50k, 500k)", "\U2265 500k")
+
+impact_data_list <- lapply(pop_groups, function(pg) fig_impact_raw %>% filter(pop_brk == pg))
+names(impact_data_list) <- pop_groups
+
+eff_data_list <- lapply(pop_groups, function(pg) fig_eff_raw %>% filter(pop_brk == pg))
+names(eff_data_list) <- pop_groups
+
+delay_data_list <- lapply(pop_groups, function(pg) fig_delay_raw %>% filter(pop_brk == pg))
+names(delay_data_list) <- pop_groups
+
+## function to add vertical dashed line for overall mean
+add_mean_line <- function(df, xvar) {
+  overall_mean <- mean(df[[xvar]], na.rm = TRUE)
+  ymin <- 0.5
+  ymax <- length(unique(df$alert_lab)) + 0.5
+  geom_segment(aes(x = overall_mean, xend = overall_mean, y = ymin, yend = ymax),
+               linetype = 2, color = "black", alpha = 0.7, inherit.aes = FALSE)
+}
+
+center_x_on_mean <- function(df, xvar) {
+  x_mean <- mean(df[[xvar]], na.rm = TRUE)
+  x_lower <- quantile(df[[xvar]], 0.05, na.rm = TRUE)
+  x_upper <- quantile(df[[xvar]], 0.95, na.rm = TRUE)
+  xlim_min <- min(x_lower, x_mean - 0.2 * (x_upper - x_lower))
+  xlim_max <- max(x_upper, x_mean + 0.2 * (x_upper - x_lower))
+  
+  c(xlim_min, xlim_max)
+}
+
+## impact boxplot
+create_impact_boxplot <- function(df, pop_label) {
+  xlim_vals <- center_x_on_mean(df, "impact")
+  ggplot(df, aes(x = impact, y = alert_lab, fill = alert_type)) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, "impact") +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Suspected Cases", labels = label_number(scale = 0.001, suffix = "k")) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      axis.text.y = element_text(size = 9, color = "black"),
+      axis.ticks.y = element_line(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle("Impact")
+}
+
+## efficiency boxplot
+create_eff_boxplot <- function(df, xvar, metric_label, pop_label) {
+  xlim_vals <- center_x_on_mean(df, xvar)
+  ggplot(df, aes_string(x = xvar, y = "alert_lab", fill = "alert_type")) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, xvar) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Cases/1k target pop", labels = label_number(big.mark = "", accuracy = 1)) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle(metric_label)
+}
+
+## delay boxplot (legend visible)
+create_delay_boxplot <- function(df, xvar, metric_label, pop_label) {
+  xlim_vals <- center_x_on_mean(df, xvar)
+  ggplot(df, aes_string(x = xvar, y = "alert_lab", fill = "alert_type")) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, xvar) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Weeks of delay", labels = label_number(big.mark = "", accuracy = 1)) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "right",
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle(metric_label)
+}
+
+## boxplots per population group
+impact_boxplots <- lapply(impact_data_list, create_impact_boxplot)
+eff_boxplots    <- lapply(eff_data_list, function(df) create_eff_boxplot(df, "eff", "Efficiency", NULL))
+delay_boxplots  <- lapply(delay_data_list, function(df) create_delay_boxplot(df, "delay", "Delay", NULL))
+
+ws <- c(4, 4, 2, 2, 4)
+
+gridExtra::grid.arrange(
+  impact_boxplots[["[50k, 500k)"]],
+  eff_boxplots[["[50k, 500k)"]],
+  ppv_barplot(fig_50k_500k),
+  missed_barplot(fig_50k_500k),
+  delay_boxplots[["[50k, 500k)"]],
+  nrow = 1, widths = ws, padding = unit(0.6, "line")
+)
+
+```
+
+```{r}
+#| label: boxplots-and-barcharts-mainpop_cCh
+#| echo: true
+#| fig.width: 10
+
+col_pal <- "Dark2"
+
+fig_impact_raw_cCh <- prep_impact_eff_dat_cCh %>% prepare_fig_dat()
+fig_eff_raw_cCh    <- prep_impact_eff_dat_cCh %>% prepare_fig_dat()
+fig_delay_raw_cCh  <- prep_missed_delay_dat_cCh %>% prepare_fig_dat()
+
+## 30 Oct save as file to compare epidemic/endemic locations and test for statistically significant differences
+add_setting_and_save(fig_impact_raw_cCh, paste0("compare_significant_impact_testmeans_cCh_", cCh_threshold, "_"))
+add_setting_and_save(fig_eff_raw_cCh,  paste0("compare_significant_efficiency_testmeans_cCh_", cCh_threshold, "_"))
+add_setting_and_save(fig_delay_raw_cCh,  paste0("compare_significant_delay_testmeans_cCh_", cCh_threshold, "_"))
+
+pop_groups <- c("< 50k", "[50k, 500k)", "\U2265 500k")
+
+impact_data_list_cCh <- lapply(pop_groups, function(pg) fig_impact_raw_cCh %>% filter(pop_brk == pg))
+names(impact_data_list_cCh) <- pop_groups
+
+eff_data_list_cCh <- lapply(pop_groups, function(pg) fig_eff_raw_cCh %>% filter(pop_brk == pg))
+names(eff_data_list_cCh) <- pop_groups
+
+delay_data_list_cCh <- lapply(pop_groups, function(pg) fig_delay_raw_cCh %>% filter(pop_brk == pg))
+names(delay_data_list_cCh) <- pop_groups
+
+## function to add vertical dashed line for overall mean
+add_mean_line <- function(df, xvar) {
+  overall_mean <- mean(df[[xvar]], na.rm = TRUE)
+  ymin <- 0.5
+  ymax <- length(unique(df$alert_lab)) + 0.5
+  geom_segment(aes(x = overall_mean, xend = overall_mean, y = ymin, yend = ymax),
+               linetype = 2, color = "black", alpha = 0.7, inherit.aes = FALSE)
+}
+
+center_x_on_mean <- function(df, xvar) {
+  x_mean <- mean(df[[xvar]], na.rm = TRUE)
+  x_lower <- quantile(df[[xvar]], 0.05, na.rm = TRUE)
+  x_upper <- quantile(df[[xvar]], 0.95, na.rm = TRUE)
+  xlim_min <- min(x_lower, x_mean - 0.2 * (x_upper - x_lower))
+  xlim_max <- max(x_upper, x_mean + 0.2 * (x_upper - x_lower))
+  
+  c(xlim_min, xlim_max)
+}
+
+## impact boxplot
+create_impact_boxplot <- function(df, pop_label) {
+  xlim_vals <- center_x_on_mean(df, "impact")
+  ggplot(df, aes(x = impact, y = alert_lab, fill = alert_type)) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, "impact") +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Suspected Cases", labels = label_number(scale = 0.001, suffix = "k")) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      axis.text.y = element_text(size = 9, color = "black"),
+      axis.ticks.y = element_line(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle("Impact")
+}
+
+## efficiency boxplot
+create_eff_boxplot <- function(df, xvar, metric_label, pop_label) {
+  xlim_vals <- center_x_on_mean(df, xvar)
+  ggplot(df, aes_string(x = xvar, y = "alert_lab", fill = "alert_type")) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, xvar) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Cases/1k target pop", labels = label_number(big.mark = "", accuracy = 1)) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle(metric_label)
+}
+
+## delay boxplot (legend visible)
+create_delay_boxplot <- function(df, xvar, metric_label, pop_label) {
+  xlim_vals <- center_x_on_mean(df, xvar)
+  ggplot(df, aes_string(x = xvar, y = "alert_lab", fill = "alert_type")) +
+    geom_boxplot(outlier.shape = 21, outlier.fill = NA) +
+    stat_summary(fun = mean, geom = "point", size = 2.5, fill = "white") +
+    add_mean_line(df, xvar) +
+    scale_fill_brewer("Alert Type", palette = col_pal) +
+    scale_x_continuous("Weeks of delay", labels = label_number(big.mark = "", accuracy = 1)) +
+    coord_cartesian(xlim = xlim_vals) +
+    theme_bw() +
+    theme(
+      legend.position = "right",
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.y = element_blank(),
+      plot.margin = unit(c(1,1,1,1), "mm")
+    ) +
+    ggtitle(metric_label)
+}
+
+## boxplots per population group
+impact_boxplots_cCh <- lapply(impact_data_list_cCh, create_impact_boxplot)
+eff_boxplots_cCh    <- lapply(eff_data_list_cCh, function(df) create_eff_boxplot(df, "eff", "Efficiency", NULL))
+delay_boxplots_cCh  <- lapply(delay_data_list_cCh, function(df) create_delay_boxplot(df, "delay", "Delay", NULL))
+
+ws <- c(4, 4, 2, 2, 4)
+
+gridExtra::grid.arrange(
+  impact_boxplots_cCh[["[50k, 500k)"]],
+  eff_boxplots_cCh[["[50k, 500k)"]],
+  ppv_barplot(fig_50k_500k_cCh),
+  missed_barplot(fig_50k_500k_cCh),
+  delay_boxplots_cCh[["[50k, 500k)"]],
+  nrow = 1, widths = ws, padding = unit(0.6, "line")
+)
+
+```
+
+
+### Dimension distributions, 50-500k without filtering for confirmed cases
+
+```{r}
+#| label: figs-50k-500k
+#| fig-cap: Utility score dimensions for 50k-500k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+ws <- c(1, .7, .7, .7, 1.25)
+
+gridExtra::grid.arrange(impact_lineplot(fig_50k_500k), eff_lineplot(fig_50k_500k), ppv_barplot(fig_50k_500k), missed_barplot(fig_50k_500k), delay_lineplot(fig_50k_500k), nrow=1, widths = ws, padding = unit(0.6, "line"))
+
+```
+
+### Dimension distributions, 50-500k w confirmed cases in the alert period higher than the threshold
+
+```{r}
+#| label: figs-50k-500k_cCh
+#| fig-cap: Utility score dimensions for 50k-500k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+ws <- c(1, .7, .7, .7, 1.25)
+
+gridExtra::grid.arrange(impact_lineplot(fig_50k_500k_cCh), eff_lineplot(fig_50k_500k_cCh), ppv_barplot(fig_50k_500k_cCh), missed_barplot(fig_50k_500k_cCh), delay_lineplot(fig_50k_500k_cCh), nrow=1, widths = ws, padding = unit(0.6, "line"))
+```
+
+### Supplement
+
+#### Dimension distributions, \<50k without filtering for confirmed cases
+
+```{r}
+#| label: figs-under-50k
+#| fig-cap: Utility score dimensions for under 50k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+gridExtra::grid.arrange(impact_lineplot(fig_under_50k), eff_lineplot(fig_under_50k), ppv_barplot(fig_under_50k), missed_barplot(fig_under_50k), delay_lineplot(fig_under_50k), nrow=1, widths = ws, padding = unit(0.6, "line"))
+
+```
+
+
+#### Dimension distributions, \<50k w confirmed cases in the alert period higher than the threshold
+
+```{r}
+#| label: figs-under-50k_cCh
+#| fig-cap: Utility score dimensions for under 50k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+gridExtra::grid.arrange(impact_lineplot(fig_under_50k_cCh), eff_lineplot(fig_under_50k_cCh), ppv_barplot(fig_under_50k_cCh), missed_barplot(fig_under_50k_cCh), delay_lineplot(fig_under_50k_cCh), nrow=1, widths = ws, padding = unit(0.6, "line"))
+
+```
+
+#### Dimension distributions \>500k without filtering for confirmed cases
+
+```{r}
+#| label: figs-over-500k
+#| fig-cap: Utility score dimensions for over 500k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+gridExtra::grid.arrange(impact_lineplot(fig_over_500k), eff_lineplot(fig_over_500k), ppv_barplot(fig_over_500k), missed_barplot(fig_over_500k), delay_lineplot(fig_over_500k), nrow=1, widths = ws, padding = unit(0.6, "line"))
+```
+
+#### Dimension distributions \>500k w confirmed cases in the alert period higher than the threshold
+
+```{r}
+#| label: figs-over-500k_cCh
+#| fig-cap: Utility score dimensions for over 500k population group. The underlying metric for each utility score dimension is displayed for all alert definitions. The vertical black dashed line depicts the mean across alert definitions and colors indicate the alert type. For line plots, 'X' indicates median of the distribution, a point indicates mean, and line indicates IQR.
+#| fig-width: 9
+#| fig-height: 6
+#| echo: true
+
+gridExtra::grid.arrange(impact_lineplot(fig_over_500k_cCh), eff_lineplot(fig_over_500k_cCh), ppv_barplot(fig_over_500k_cCh), missed_barplot(fig_over_500k_cCh), delay_lineplot(fig_over_500k_cCh), nrow=1, widths = ws, padding = unit(0.6, "line"))
+```
+
+
+## Sensitivity Analysis across thresholds
+
+```{r}
+#| label: cCh-comparison-plots
+#| eval: true
+#| echo: false
+#| warning: false
+#| message: false
+#| fig.width: 14
+#| fig.height: 8
+#| results: asis
+
+which_setting <- "epidemic" 
+thresholds    <- c(0, 1, 2, 5, 10, 20)
+
+## absolute path to load data, there is some problem with loading from relative dirs
+pre_path <- "C:/Users/chalam/Documents/outbreaks_project/main_ecl_dec2024/inputs"
+
+for (popgroup in pop_groups){
+  for(th in thresholds){
+  f <- file.path(pre_path, paste0("compare_significant_missed_ppv_chisquare_cCh_", th, "_", which_setting, ".rds"))
+  if(!file.exists(f)) stop("File not found: ", f)
+  message("Found: ", f)
+}
+
+load_cCh_all <- function(th) {
+  
+  read_file <- function(prefix){
+    fname <- file.path(pre_path, paste0(prefix, th, "_", which_setting, ".rds"))
+    if(!file.exists(fname)) stop("Cannot open file: ", fname)
+    readRDS(fname) %>% mutate(threshold = th)
+  }
+  
+  list(
+    complete   = read_file("compare_significant_missed_ppv_chisquare_cCh_"),
+    impact_raw = read_file("compare_significant_impact_testmeans_cCh_"),
+    eff_raw    = read_file("compare_significant_efficiency_testmeans_cCh_"),
+    delay_raw  = read_file("compare_significant_delay_testmeans_cCh_")
+  )
+}
+
+all_loaded <- map(thresholds, function(th) {
+  message("Loading threshold: ", th)
+  load_cCh_all(th)
+})
+
+combined_complete   <- map_df(all_loaded, "complete")
+combined_impact_raw <- map_df(all_loaded, "impact_raw")
+combined_eff_raw    <- map_df(all_loaded, "eff_raw")
+combined_delay_raw  <- map_df(all_loaded, "delay_raw")
+
+make_factor_safe <- function(df){
+  if(nrow(df) > 0) df %>% mutate(threshold = factor(threshold, levels = thresholds))
+  else df
+}
+
+## only looking at the required population group
+combined_complete   <- make_factor_safe(combined_complete %>% filter(pop_brk == popgroup )) 
+combined_impact_raw <- make_factor_safe(combined_impact_raw %>% filter(pop_brk == popgroup ))
+combined_eff_raw    <- make_factor_safe(combined_eff_raw %>% filter(pop_brk == popgroup ))
+combined_delay_raw  <- make_factor_safe(combined_delay_raw %>% filter(pop_brk == popgroup ))
+
+message("All data loaded successfully")
+
+## table
+table_combined <- combined_complete %>%
+  filter(pop_brk == popgroup) %>%
+  select(alert_number, alert_type, alert_lab, impact_mean, eff_mean, ppv, missed_prop, delay_mean, threshold) %>%
+  distinct() 
+
+# table_pretty <- table_combined %>%
+#   select(alert_type, alert_lab, impact_mean, eff_mean, ppv, missed_prop, delay_mean, threshold) %>%
+#   distinct() %>%
+#   arrange(alert_type, alert_lab) %>%
+#   rename(
+#     "Alert Type" = alert_type,
+#     "Alert Definition" = alert_lab,
+#     "Mean Impact" = impact_mean,
+#     "Mean Effectiveness" = eff_mean,
+#     "PPV" = ppv,
+#     "Missed Proportion" = missed_prop,
+#     "Mean Delay" = delay_mean,
+#     "Threshold" = threshold
+#   )
+
+table_pretty <- table_combined %>%
+  select(alert_type, alert_lab, impact_mean, eff_mean, ppv, missed_prop, delay_mean, threshold) %>%
+  distinct() %>%
+  arrange(alert_type, alert_lab) %>%
+  rename(
+    "Alert Type" = alert_type,
+    "Alert Definition" = alert_lab,
+    "Impact" = impact_mean,
+    "Efficiency" = eff_mean,
+    "PPV" = ppv,
+    "Missed" = missed_prop,
+    "Timeliness" = delay_mean,
+    "Threshold" = threshold
+  )
+
+table_print <- table_pretty %>%
+  kable(
+    format = "html",       
+    caption = "Dimension Metrics Across cCh Thresholds",
+    digits = 2
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    position = "center"
+  ) 
+
+print(table_print)
+  
+## scatterplot
+
+df_long <- table_pretty %>%
+  pivot_longer(
+    cols = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness"),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = factor(Metric, levels = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness"))
+  )
+
+
+metric_scatterplot <- ggplot(df_long, aes(x = Threshold, y = Value)) +
+  geom_point() +
+  facet_grid(Metric ~ `Alert Definition` + `Alert Type`, scales = "free_y") +
+  theme_bw() +
+  labs(
+    x = "Threshold", 
+    y = "Metric Value", 
+    title = paste0("Metrics Across Thresholds by Alert Type and Definition , ",popgroup )
+  )
+
+print(metric_scatterplot)
+
+baseline <- table_pretty %>%
+  filter(
+    str_detect(`Alert Definition`, regex("≥ 50 weekly", ignore_case = TRUE)),
+    Threshold == 0
+  ) %>%
+  pivot_longer(
+    cols = c("Impact", "Efficiency", "PPV",
+             "Missed", "Timeliness"),
+    names_to = "Metric",
+    values_to = "Baseline"
+  ) %>% 
+  select(Metric, Baseline) %>%
+  mutate(
+    Metric = factor(Metric, levels = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness"))
+  )
+
+
+df_long <- table_pretty %>%
+  pivot_longer(
+    cols = c("Impact", "Efficiency", "PPV",
+             "Missed", "Timeliness"),
+    names_to = "Metric",
+    values_to = "Value"
+  ) %>%
+  mutate(
+    Metric = factor(Metric, levels = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness"))
+  )
+
+df_filtered <- df_long %>%
+  filter(
+    !str_detect(`Alert Definition`, regex("≥ 50 weekly", ignore_case = TRUE))
+  )
+
+df_raw <- df_filtered %>%
+  left_join(baseline, by = "Metric") %>%
+  mutate(
+    Threshold = as.numeric(as.character(Threshold))
+  )
+
+compare_to_baseline_plot <- ggplot(df_raw, aes(
+  x = Value, 
+  y = `Alert Definition`,
+  color = Threshold
+)) +
+  geom_point(size = 3, alpha = 0.9) +
+  scale_color_gradient(
+    low = "#b2df8a",   
+    high = "#1f78b4"   
+  ) +
+  geom_vline(
+    data = baseline,
+    aes(xintercept = Baseline),
+    linetype = "dashed",
+    color = "grey40"
+  ) +
+  facet_wrap(~ Metric, scales = "free_x") +
+  theme_minimal(base_size = 16) +
+  labs(
+    title = paste0("Utility Dimension Metrics Across cCh Thresholds , ", popgroup),
+    subtitle = "Baseline (≥50 weekly at threshold 0) shown as dashed line",
+    x = "",
+    y = "Alert Definition",
+    color = "Threshold"
+  )
+
+print(compare_to_baseline_plot)
+
+}
+
+```
+
+
+```{r}
+#| eval: true
+
+compare_case_alerts_to_50weekly_blackline <- function(
+  popgroup,
+  which_setting = "epidemic",
+  pre_path = "C:/Users/chalam/Documents/outbreaks_project/main_ecl_dec2024/inputs",
+  thresholds = 0:5
+) {
+
+  # Helper to load data per threshold
+  load_cCh_all <- function(th) {
+    fname <- file.path(pre_path, paste0("compare_significant_missed_ppv_chisquare_cCh_", th, "_", which_setting, ".rds"))
+    if(!file.exists(fname)) stop("Cannot open file: ", fname)
+    readRDS(fname) %>% mutate(threshold = th)
+  }
+
+  # Load and combine
+  combined_complete <- map_df(thresholds, function(th) {
+    message("Loading threshold: ", th)
+    load_cCh_all(th)
+  })
+
+  # Filter to population and case alerts
+  df_cases <- combined_complete %>%
+    filter(pop_brk == popgroup, alert_type == "case") %>%
+    mutate(threshold = factor(threshold, levels = thresholds)) %>%
+    select(alert_lab, impact_mean, eff_mean, ppv, missed_prop, delay_mean, threshold)
+
+  if (nrow(df_cases) == 0) stop("No 'case' alerts found for this population group.")
+
+baseline <- df_cases %>%
+    filter(alert_lab == "≥ 50 weekly", threshold == 0) %>%  # no space
+    pivot_longer(
+        cols = c(impact_mean, eff_mean, ppv, missed_prop, delay_mean),
+        names_to = "Metric",
+        values_to = "Baseline"
+    ) %>%
+    mutate(
+        Metric = recode(
+            Metric,
+            impact_mean = "Impact",
+            eff_mean    = "Efficiency",
+            ppv         = "PPV",
+            missed_prop = "Missed",
+            delay_mean  = "Timeliness"
+        )
+    ) %>%
+    select(Metric, Baseline) %>%
+  mutate(
+    Metric = factor(Metric, levels = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness"))
+  )
+
+# Filter out baseline from comparison points
+df_compare <- df_cases %>%
+    filter(!(alert_lab == "≥ 50 weekly")) %>%  # no space
+    pivot_longer(
+        cols = c(impact_mean, eff_mean, ppv, missed_prop, delay_mean),
+        names_to = "Metric",
+        values_to = "Value"
+    ) %>%
+    left_join(baseline, by = "Metric") %>%
+    mutate(threshold = as.numeric(as.character(threshold))) %>%
+    mutate(Metric = recode(
+        Metric,
+        impact_mean = "Impact",
+        eff_mean    = "Efficiency",
+        ppv         = "PPV",
+        missed_prop = "Missed",
+        delay_mean  = "Timeliness"
+    )) %>%
+  mutate(
+    Metric = factor(Metric, levels = c("Impact", "Efficiency", "PPV", "Missed", "Timeliness"))
+  )
+
+
+  # Plot
+  p <- ggplot(df_compare, aes(x = Value, y = alert_lab, color = threshold)) +
+    geom_point(size = 3, alpha = 0.9) +
+    scale_color_gradient(low = "#b2df8a", high = "#1f78b4") +
+    geom_vline(
+      data = baseline,
+      aes(xintercept = Baseline),
+      linetype = "dashed",
+      color = "black",
+      size = 0.8
+    ) +
+    facet_wrap(~ Metric, scales = "free_x") +
+    theme_minimal() +
+    labs(
+      title = paste0("Case Alert Metrics Across Thresholds 0–5, ", popgroup),
+      subtitle = "Baseline: ≥50 weekly at threshold 0 (black dashed line)",
+      x = "Metric Value",
+      y = "Alert Definition",
+      color = "Threshold"
+    )
+
+  print(p)
+
+  invisible(df_compare)
+}
+
+# Run the comparison plot
+for (pop_group in pop_groups){
+  compare_case_alerts_to_50weekly_blackline(popgroup = pop_group)
+}
+
+
+```
+
+## Spatial and temporal coverage across thresholds
+
+### Spatial coverage
+
+```{r}
+#| label: cCh-spatial-coverage-plots
+#| eval: false
+
+for (thresh in thresholds) {
+  
+  alerts_w_cCh_threshold <- a_with_counts %>%
+    dplyr::select(alert_id, alert_lab, total_confirmed_cases, total_suspected_cases, confirmed_prop, location) %>%
+    dplyr::filter(total_confirmed_cases >= thresh)
+
+  outbreak_shapes <- readr::read_rds(file.path(pre_path, "outbreak_shapefiles.rds"))
+
+  alerts_w_cCh_threshold_lctnpr <- alerts_w_cCh_threshold %>%
+    dplyr::select(alert_id, location) %>%
+    dplyr::left_join(pre_extract, by = "location") %>%
+    dplyr::select(alert_id, location, location_period_id, spatial_scale) %>%
+    dplyr::distinct()
+
+  if (!inherits(outbreak_shapes, "sf")) {
+    outbreak_shapes <- sf::st_as_sf(outbreak_shapes)
+  }
+
+  if (is.na(sf::st_crs(outbreak_shapes))) {
+    sf::st_crs(outbreak_shapes) <- 4326
+  } else if (sf::st_crs(outbreak_shapes) != sf::st_crs(4326)) {
+    outbreak_shapes <- sf::st_transform(outbreak_shapes, 4326)
+  }
+
+  africa <- giscoR::gisco_get_countries(
+    region = "Africa",
+    resolution = "3"
+  )
+
+  shape_join <- alerts_w_cCh_threshold_lctnpr %>%
+    left_join(
+      outbreak_shapes,
+      by = c("location_period_id" = "lctn_pr")
+    ) %>%
+    distinct(location, .keep_all = TRUE) %>%
+    sf::st_as_sf() %>%
+    sf::st_make_valid()
+
+  shape_join <- shape_join %>%
+    mutate(scale_group = case_when(
+      spatial_scale %in% c("admin1", "admin1 composite") ~ "Admin1",
+      spatial_scale %in% c("admin2", "admin2 composite") ~ "Admin2",
+      spatial_scale %in% c("admin3", "admin3 composite") ~ "Admin3",
+      TRUE ~ spatial_scale
+    )) %>%
+    mutate(scale_group = factor(scale_group, levels = c("Admin1", "Admin2", "Admin3")))
+
+  scale_colors <- c("Admin1" = "lightblue1",
+                  "Admin2" = "lightblue3",
+                  "Admin3" = "lightblue4")
+
+## the map
+  map <- ggplot() +
+    geom_sf(data = africa, fill = "gray95", color = "gray80", linewidth = 0.2) +
+    geom_sf(data = shape_join %>% filter(scale_group == "Admin1"), 
+          aes(fill = scale_group), color = "white", lwd = 0.2) +
+    geom_sf(data = shape_join %>% filter(scale_group == "Admin2"), 
+          aes(fill = scale_group), color = "white", lwd = 0.2) +
+    geom_sf(data = shape_join %>% filter(scale_group == "Admin3"), 
+          aes(fill = scale_group), color = "white", lwd = 0.2, alpha = 0.9) +
+    scale_fill_manual(values = scale_colors, name = "Spatial Scale") +
+    theme_minimal() +
+    labs(
+      title = paste0("Alert locations filtered for cCh ",thresh, " ,", which_setting)
+    ) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 12),
+      plot.caption = element_text(size = 10, color = "gray40"),
+      legend.position = "bottom",
+      legend.title = element_text(size = 11, face = "bold"),
+      legend.text = element_text(size = 10),
+      axis.title = element_blank()
+    ) +
+    coord_sf(xlim = c(-20, 55), ylim = c(-35, 38), expand = FALSE) 
+
+
+  print(map)
+
+}
+
+```
+
+
+```{r}
+#| label: cCh-spatial-coverage-plots-2
+
+combined_sf <- list()
+
+for (thresh in thresholds) {
+
+  alerts_w_cCh_threshold <- a_with_counts %>%
+    select(alert_id, alert_lab, total_confirmed_cases, total_suspected_cases,
+           confirmed_prop, location) %>%
+    filter(total_confirmed_cases >= thresh)
+
+  alerts_w_cCh_threshold_lctnpr <- alerts_w_cCh_threshold %>%
+    select(alert_id, location) %>%
+    left_join(pre_extract, by = "location") %>%
+    select(alert_id, location, location_period_id, spatial_scale) %>%
+    distinct() %>%
+    mutate(threshold = thresh)
+
+  combined_sf[[as.character(thresh)]] <- alerts_w_cCh_threshold_lctnpr
+}
+
+combined_df <- bind_rows(combined_sf)
+
+outbreak_shapes <- readr::read_rds(file.path(pre_path, "outbreak_shapefiles.rds"))
+
+if (!inherits(outbreak_shapes, "sf")) {
+  outbreak_shapes <- st_as_sf(outbreak_shapes)
+}
+if (is.na(st_crs(outbreak_shapes))) {
+  st_crs(outbreak_shapes) <- 4326
+} else if (st_crs(outbreak_shapes) != st_crs(4326)) {
+  outbreak_shapes <- st_transform(outbreak_shapes, 4326)
+}
+
+combined_sf <- combined_df %>%
+  left_join(outbreak_shapes, by = c("location_period_id" = "lctn_pr")) %>%
+  distinct(location, threshold, .keep_all = TRUE) %>%
+  st_as_sf() %>%
+  st_make_valid()
+
+combined_sf <- combined_sf %>%
+  mutate(scale_group = case_when(
+    spatial_scale %in% c("admin1", "admin1 composite") ~ "Admin1",
+    spatial_scale %in% c("admin2", "admin2 composite") ~ "Admin2",
+    spatial_scale %in% c("admin3", "admin3 composite") ~ "Admin3",
+    TRUE ~ spatial_scale
+  )) %>%
+  mutate(scale_group = factor(scale_group, levels = c("Admin1", "Admin2", "Admin3")))
+
+africa <- giscoR::gisco_get_countries(region = "Africa", resolution = "3")
+
+scale_colors <- c(
+  "Admin1" = "lightblue1",
+  "Admin2" = "lightblue3",
+  "Admin3" = "lightblue4"
+)
+
+ggplot() +
+  geom_sf(data = africa, fill = "gray95", color = "gray80", linewidth = 0.25) +
+
+  geom_sf(data = combined_sf,
+          aes(fill = scale_group),
+          color = "white", lwd = 0.2, alpha = 0.9) +
+
+  scale_fill_manual(values = scale_colors, name = "Administrative Level") +
+
+  facet_wrap(~ threshold) +
+
+  labs(
+    title = paste0("Alert locations (", which_setting, ")"),
+    subtitle = "One panel per cCh threshold"
+  ) +
+
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 18, face = "bold"),
+    legend.position = "bottom",
+
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank()
+  ) +
+
+  coord_sf(xlim = c(-20, 55), ylim = c(-35, 38), expand = FALSE)
+
+
+```
+### Temporal coverage
+
+```{r}
+#| label: cCh-temporal-coverage-plots
+#| fig.width: 20
+#| fig.height: 20
+
+global_week_index <- a_with_counts %>%
+  mutate(
+    iso_year = isoyear(TL),
+    iso_week = isoweek(TL),
+    yearweek = paste0(iso_year, "-W", sprintf("%02d", iso_week))
+  ) %>%
+  distinct(yearweek) %>%
+  arrange(yearweek) %>%
+  pull(yearweek)
+
+# x axis breaks every 30 weeks globally
+global_week_breaks <- global_week_index[seq(1, length(global_week_index), 30)]
+
+for (thresh in thresholds) {
+
+  alerts_w_cCh_threshold <- a_with_counts %>%
+    select(alert_id, alert_lab, TL, total_confirmed_cases, total_suspected_cases,
+           confirmed_prop, location) %>%
+    filter(total_confirmed_cases >= thresh)
+
+  alerts_w_cCh_threshold_temp <- alerts_w_cCh_threshold %>%
+    select(alert_id, TL, alert_lab, location) %>%
+    left_join(pre_extract, by = c("location", "TL")) %>%
+    select(alert_id, alert_lab, TL, TR) %>%
+    distinct()
+
+  weekly_counts <- alerts_w_cCh_threshold_temp %>%
+    mutate(
+      iso_year = isoyear(TL),
+      iso_week = isoweek(TL),
+      yearweek = paste0(iso_year, "-W", sprintf("%02d", iso_week))
+    ) %>%
+    count(alert_lab, yearweek)
+
+  # fill missing weeks using the global week index
+  weekly_complete <- weekly_counts %>%
+    complete(alert_lab, yearweek = global_week_index, fill = list(n = 0))
+
+  temp_density_plot <- ggplot(weekly_complete, aes(x = yearweek, y = 1, fill = n)) +
+    geom_tile() +
+    facet_wrap(~alert_lab) +
+    scale_fill_viridis_c(limits = c(0, 100)) +
+    scale_x_discrete(breaks = global_week_breaks) +   
+    theme_minimal(base_size = 20) +
+    theme(
+      axis.text.y = element_blank(),
+      axis.title.y = element_blank(),
+      panel.grid = element_blank(),
+      axis.text.x = element_text(angle = 90, hjust = 1, size = 7)
+    ) +
+    labs(
+      title = paste0("Weekly Alert Density for cCh threshold: ", thresh),
+      x = "ISO Week",
+      fill = "Alert Count"
+    )
+
+  print(temp_density_plot)
+}
+
+
+```
