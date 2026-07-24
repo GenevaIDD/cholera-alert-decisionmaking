@@ -6,7 +6,7 @@ library(OutbreakExtractR)
 ## directories
 new_dpath <- "../../main_ecl_dec2024/outputs"
 plot_path <- paste0(new_dpath, "/exploratory")
-pre_path <- "../../main_ecl_dec2024/inputs/"
+pre_path <- "../../data/"
 qmd_path <- "../../notebooks"
 fig_path <- "../../notebooks/manuscript_figures"
 

@@ -47,9 +47,9 @@ library(purrr)
 library(stringr)
 
 
-new_dpath <- "../../main_ecl_dec2024/outputs"
+new_dpath <- "../data"
 plot_path <- paste0(new_dpath, "/exploratory")
-pre_path <- "../../main_ecl_dec2024/inputs/"
+pre_path <- "../data/"
 
 testing <- params$testing ## process the testing dataset or full evaluation of outbreaks
 test_cntry <- if(testing){"COD"}
@@ -143,7 +143,7 @@ if(use_filtered_linked){
   linked <- readr::read_rds(paste0(new_dpath, "/linked_outbreaks_alert_groups_", ag_nweeks_code, ".rds"))
 }
 
-pre_extract <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction.rds"))
+pre_extract <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction_public_apr_2025.rds"))
 pre_extract <- dplyr::mutate(pre_extract, pop_brk = cut(pop, breaks = c(0, 50000, 500000, max(pre_extract$pop)), labels = c("<50k", "[50k, 500k)", "\U2265 500k"), include.lowest=T, right=FALSE))
 
 ```

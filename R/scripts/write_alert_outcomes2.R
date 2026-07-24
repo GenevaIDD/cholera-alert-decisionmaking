@@ -24,15 +24,15 @@ alert_columns <- paste0("alert", 1:24) ## unique alert columns
 
 ## change orig_dpath to the location of the preoutbreak extractions
 ## change new_dpath to the location where alert and outcome summary data are stored
-orig_dpath <- "C:/Users/chalam/Documents/outbreaks_project/main_ecl_dec2024/inputs"
-new_dpath <- "C:/Users/chalam/Documents/outbreaks_project/main_ecl_dec2024/outputs"
+orig_dpath <- "../../data"
+new_dpath <- "../../data"
 
 ########## Write Alerts ########## 
 
 if(testing & !file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".rds")))){
   print("Processing alerts for testing data")
   
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## includes obs without location periods
+  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## includes obs without location periods
   ct_clean_export <- dplyr::filter(ct_clean_export, country == test_cntry)
   
   ## averaging duplicates with existing OutbreakExtractR function
@@ -63,11 +63,11 @@ if(testing & !file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".r
 
 } else if(testing & file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".rds")))){
   ct <- readr::read_rds(file.path(new_dpath, paste0("alerts_", test_cntry, ".rds")))
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## needed to calculate cases in evaluation period
+  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## needed to calculate cases in evaluation period
 } else if(!testing & !file.exists(file.path(new_dpath, "alerts.rds"))){
   print("Processing alerts for all data")
   
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## includes obs without location periods
+  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## includes obs without location periods
   
   ## averaging duplicates with existing OutbreakExtractR function
   if(any(duplicated(ct_clean_export))){
@@ -97,7 +97,7 @@ if(testing & !file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".r
 
 } else{
   ct <- readr::read_rds(file.path(new_dpath, "alerts.rds"))
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## needed to calculate cases in evaluation period
+  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## needed to calculate cases in evaluation period
 }
 
 ########## Write Alert Groups ########## 
