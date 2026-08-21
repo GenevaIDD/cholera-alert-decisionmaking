@@ -10,6 +10,8 @@ This repository contains the analysis code for "A decision analytic framework fo
 
 Alam C, Zheng Q, Perez-Saez J, Kim J-H, Azman AS, Lee EC. "A Decision Analytic Framework for Triggering Cholera Outbreak Response Based on Early-Case Surveillance." Unpublished manuscript.
 
+[Preprint available here.](https://www.medrxiv.org/content/10.64898/2026.07.16.26358045v1)
+
 ## Data
 
 We include a version of the original dataset with only publicly available data to re-run analyses. We do not expect users will be able to exactly recreate the results in the original paper, which used a dataset including public and non-public data.
