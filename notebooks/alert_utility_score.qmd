@@ -305,10 +305,11 @@ if (ocv_status == "unvaccinated"){
 
 ```
 
-```{r, eval: ocv_status %in% c("vaccinated", "unvaccinated")}
+```{r}
 #| echo: false
 #| message: false
 #| warning: false
+#| eval: !expr params$ocv_status %in% c("vaccinated", "unvaccinated")
 
 summary_stats <- evalC_full %>%   
   summarise(
