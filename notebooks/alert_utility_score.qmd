@@ -2557,6 +2557,7 @@ get_top4_for_cutoff <- function(full_dat, cutoff_val) {
     ungroup()
   
   top4 <- dat_with_min %>%
+    filter(min_score >= cutoff_val) %>% ## added as issue 7 from claude code review
     group_by(pop_brk) %>%
     arrange(desc(util_score)) %>%
     slice_head(n = 4) %>%
