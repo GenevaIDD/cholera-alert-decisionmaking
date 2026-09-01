@@ -1,0 +1,208 @@
+---
+title: "Alert valuation period censoring exploration"
+format: html
+editor: source
+---
+
+## By country
+
+```{r, fig.width=10, fig.height=10}
+
+## libraries
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(stringr)
+
+## load preoutbreak time series data
+pre_path: "../data/"
+preout <- readRDS(file.path(pre_path, "time_series_preoutbreak_extraction_public_apr_2025.rds"))
+
+location_tr <- preout %>%
+  group_by(location) %>%
+  summarise(
+    loc_start_week = min(TL),
+    loc_end_week   = max(TR),
+    loc_tr_weeks   = n(),
+    .groups = "drop"
+  )
+
+## load alert evaluation at different delays
+
+eval_all <- lapply(0:24, function(dw){
+
+  #file_path <- paste0("../../main_ecl_dec2024/outputs/evaluation_cases_dw", dw, "_ew52.rds")
+  file_path <- paste0(pre_path, "evaluation_cases_dw", dw, "_ew52.rds")
+
+  df <- readRDS(file_path)
+
+  df <- df %>%
+    mutate(location = str_trim(location)) %>%
+    left_join(location_tr %>% mutate(location = str_trim(location)), by = "location") %>%
+    mutate(
+      ## intended evaluation window is 52 weeks (364 days)
+      evaluation_end_date = evaluation_start_date + 364 - 1,
+
+      ## observed end date (censor at available data)
+      observed_end = pmin(evaluation_end_date, loc_end_week),
+
+      ## Number of observed days (inclusive)
+      observed_days = as.numeric(observed_end - evaluation_start_date + 1),
+
+      ## Number of fully observed weeks
+      O_weeks = floor(observed_days / 7),
+
+      ## ensure bounds
+      O_weeks = pmax(O_weeks, 0),
+      O_weeks = pmin(O_weeks, 52),
+
+      ## censored weeks
+      censor_weeks = 52 - O_weeks,
+      censor_weeks = pmax(censor_weeks, 0),
+
+      prop_eval_missing = censor_weeks / 52,
+
+      delay = dw,
+      country_code = str_split(location, "::", simplify = TRUE)[,2],
+      alert_def = str_extract(alert_id, "^a(\\d+)") %>%
+        str_remove("^a") %>%
+        as.integer()
+    )
+
+  return(df)
+})
+
+eval_all <- bind_rows(eval_all)
+## save object to be used in the rest of the pipeline
+saveRDS(eval_all, file = file.path(pre_path, "evaluation_time_censoring.rds"))
+
+## plot
+summary_combined <- eval_all %>%
+  group_by(alert_def, country_code, delay) %>%
+  summarise(
+    n_alerts = n(),
+    avg_prop_missing = mean(prop_eval_missing, na.rm = TRUE),
+    prop_complete = mean(prop_eval_missing == 0, na.rm = TRUE), ## fraction fully covered
+    .groups = "drop"
+  )
+
+## 1 plot per alert definition
+alert_defs <- sort(unique(summary_combined$alert_def))
+
+combined_plots <- lapply(alert_defs, function(a){
+  
+  df_summary <- summary_combined %>% filter(alert_def == a)
+  
+  df_points <- eval_all %>% filter(alert_def == a)
+  
+  ggplot() +
+    
+    ## individual alert points with proportion of evaluation period missing
+    geom_jitter(data = df_points,
+                aes(x = delay, y = prop_eval_missing),
+                width = 0.2, height = 0, alpha = 0.3, color = "grey") +
+    
+    geom_line(data = df_summary, aes(x = delay, y = prop_complete, color = "Proportion complete"), linewidth = 1) +
+    geom_point(data = df_summary, aes(x = delay, y = prop_complete, color = "Proportion complete"), size = 2) +
+    geom_line(data = df_summary, aes(x = delay, y = avg_prop_missing, color = "Average missing proportion"), linewidth = 1) +
+    geom_point(data = df_summary, aes(x = delay, y = avg_prop_missing, color = "Average missing proportion"), size = 2) +
+    
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,1)) +
+    scale_color_manual(values = c("Proportion complete" = "steelblue",
+                                  "Average missing proportion" = "red3")) +
+    labs(
+      x = "Implementation delay (weeks)",
+      y = "Proportion / Missing fraction",
+      color = "",
+      title = paste0("Alert definition a", a)
+    ) +
+    facet_wrap(~country_code) +
+    theme_minimal(base_size = 12)
+})
+
+for (i in 1:length(combined_plots)){
+  print(combined_plots[[i]])
+}
+
+
+```
+
+## All countries
+
+```{r}
+
+summary_combined_all_countries <- eval_all %>%
+  group_by(alert_def, delay) %>%
+  summarise(
+    n_alerts = n(),
+    avg_prop_missing = mean(prop_eval_missing, na.rm = TRUE),
+    prop_complete = mean(prop_eval_missing == 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+alert_defs <- sort(unique(summary_combined_all_countries$alert_def))
+
+combined_plots_all_countries <- lapply(alert_defs, function(a){
+  
+  df_summary <- summary_combined_all_countries %>% filter(alert_def == a)
+  df_points  <- eval_all %>% filter(alert_def == a)
+  
+  ggplot() +
+    
+    ## individual alert-level missingness (all countries)
+    geom_jitter(
+      data = df_points,
+      aes(x = delay, y = prop_eval_missing),
+      width = 0.2, height = 0,
+      alpha = 0.1,
+      color = "lightgrey"
+    ) +
+    
+    ## summary lines
+    geom_line(
+      data = df_summary,
+      aes(x = delay, y = prop_complete, color = "Proportion complete"),
+      linewidth = 1
+    ) +
+    geom_point(
+      data = df_summary,
+      aes(x = delay, y = prop_complete, color = "Proportion complete"),
+      size = 2
+    ) +
+    geom_line(
+      data = df_summary,
+      aes(x = delay, y = avg_prop_missing, color = "Average missing proportion"),
+      linewidth = 1
+    ) +
+    geom_point(
+      data = df_summary,
+      aes(x = delay, y = avg_prop_missing, color = "Average missing proportion"),
+      size = 2
+    ) +
+    scale_y_continuous(
+      labels = scales::percent_format(accuracy = 1),
+      limits = c(0, 1)
+    ) +
+    scale_color_manual(
+      values = c(
+        "Proportion complete" = "steelblue",
+        "Average missing proportion" = "red3"
+      )
+    ) +
+    labs(
+      x = "Implementation delay (weeks)",
+      y = "Proportion / Missing fraction",
+      color = "",
+      title = paste0("Alert definition a", a, " (all countries)")
+    ) +
+    theme_minimal(base_size = 12)
+})
+
+for (i in seq_along(combined_plots_all_countries)) {
+  print(combined_plots_all_countries[[i]])
+}
+
+
+
+```
