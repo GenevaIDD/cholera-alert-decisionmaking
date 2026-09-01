@@ -40,7 +40,7 @@ generated quantities {
 
   // prior predictive
   real beta_sim = normal_rng(0, 1);
-  real sigma_sim = fabs(normal_rng(0, 1);
+  real sigma_sim = fabs(normal_rng(0, 1));
 
   for (i in 1:N) {
     real mu_prior = beta_sim * d[i];
