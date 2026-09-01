@@ -289,14 +289,14 @@ if (ocv_status == "unvaccinated"){
     select(-vaccinated)
 
   linked <- linked %>%
-    dplyr::filter(!alert_id %in% eval_nonvaccinated$alert_id)
+    dplyr::filter(alert_id %in% eval_nonvaccinated$alert_id)
 
 } else if (ocv_status == "vaccinated"){
   evalC_cl <- eval_vaccinated %>%
     select(-vaccinated)
 
   linked <- linked %>%
-    dplyr::filter(!alert_id %in% eval_vaccinated$alert_id)
+    dplyr::filter(alert_id %in% eval_vaccinated$alert_id)
 
 } else {
   evalC_cl <- evalC_cl %>%
