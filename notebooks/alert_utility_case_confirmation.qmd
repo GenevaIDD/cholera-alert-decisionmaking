@@ -1431,7 +1431,7 @@ which_setting <- "epidemic"
 thresholds    <- c(0, 1, 2, 5, 10, 20)
 
 ## absolute path to load data, there is some problem with loading from relative dirs
-pre_path <- "C:/Users/chalam/Documents/outbreaks_project/main_ecl_dec2024/inputs"
+#pre_path <- "C:/Users/chalam/Documents/outbreaks_project/main_ecl_dec2024/inputs"
 
 for (popgroup in pop_groups){
   for(th in thresholds){
