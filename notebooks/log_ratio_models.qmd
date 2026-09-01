@@ -55,6 +55,7 @@ transform_posterior <- params$transform_posterior ## whether to transform poster
 rate_ratio_model <- params$rate_ratio_model
 remove_censored <- params$remove_censored
 fig_path <- params$fig_path ## where we save slope summaries to get manuscript figure 5
+pre_path <- "../data/"
 
 ## load stan model
 stan_file <- switch(model_choice,
@@ -288,7 +289,7 @@ data <- data %>%
   tidyr::extract(alert_id, into = "year", regex = "_(\\d{4})", remove = FALSE)
 
 ## load population data to select only required population group
-ts_population <- readRDS("../../main_ecl_dec2024/inputs/time_series_preoutbreak_extraction.rds") %>%
+ts_population <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction_public_apr_2025.rds"))%>%
   transmute(location, year = as.character(year(TL)), pop) %>%
   distinct() %>%
   group_by(year, location) %>%
