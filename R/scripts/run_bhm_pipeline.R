@@ -1,9 +1,9 @@
 ## This is master script that runs the analyses of alert outcomes to run the sensitivity to delay models
 
 ## directories
-new_dpath <- "../../main_ecl_dec2024/outputs"
+new_dpath <- "../data/"
 plot_path <- paste0(new_dpath, "/exploratory")
-pre_path <- "../../main_ecl_dec2024/inputs/"
+pre_path <- "../data/"
 qmd_path <- "../../notebooks"
 fig_path <- "../../notebooks/manuscript_figures"
 
