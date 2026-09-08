@@ -521,8 +521,8 @@ global_medians <- slopes_df %>%
 
 country_raw <- slopes_df %>%
   filter(level == "country_raw") %>%
-  select(country, pop_group, median, q5, q95) %>%
-  mutate(significant = !(q5 <= 0 & q95 >= 0))
+  select(country, pop_group, median, q25, q975) %>%
+  mutate(significant = !(q25 <= 0 & q975 >= 0))
 
 country_slopes <- slopes_df %>%
   filter(level == "country") %>%
