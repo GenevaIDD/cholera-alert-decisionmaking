@@ -1336,16 +1336,16 @@ summarize_effective_slopes <- function(fit, model_choice, prep, transform_poster
   summarize_draws_df <- function(x) {
     tibble(
       median = apply(x, 2, median),
-      q5   = apply(x, 2, quantile, 0.05),
-      q95  = apply(x, 2, quantile, 0.95)
+      q25   = apply(x, 2, quantile, 0.025),
+      q975  = apply(x, 2, quantile, 0.975)
     )
   }
 
   ## global
   global <- tibble(
     median = median(draws$alpha0),
-    q5     = quantile(draws$alpha0, 0.05),
-    q95    = quantile(draws$alpha0, 0.95),
+    q25     = quantile(draws$alpha0, 0.025),
+    q975    = quantile(draws$alpha0, 0.975),
     level  = "global",
     id     = "global"
   )
@@ -1476,8 +1476,8 @@ slope_summaries2 <- df_for_plot %>%
   select(
     id = Parameter,
     median = Median,
-    q5 = `2.5%`,
-    q95 = `97.5%`
+    q25 = `2.5%`,
+    q975 = `97.5%`
   ) %>%
   mutate(
     level = case_when(
@@ -1495,7 +1495,7 @@ plot_effective_slopes <- function(slope_summaries, title = "Posterior effects") 
 
   ggplot(slope_summaries, aes(x = median, y = id, color = level)) +
     geom_point(size = 2.5) +
-    geom_errorbarh(aes(xmin = q5, xmax = q95), height = 0.2, linewidth = 0.6) +
+    geom_errorbarh(aes(xmin = q25, xmax = q975), height = 0.2, linewidth = 0.6) +
     
     # global reference line (if exists)
     geom_vline(
@@ -1533,8 +1533,8 @@ if (model_choice %in% c("modelB", "modelB2", "modelB3")) {
     dplyr::mutate(
       country_code = gsub("^Country: (.+) \\(% change\\)$", "\\1", .data[["Parameter"]]),
       perc_change = .data[["Median"]],   
-      perc_q5    = .data[["2.5%"]],
-      perc_q95   = .data[["97.5%"]]
+      perc_q25    = .data[["2.5%"]],
+      perc_q975   = .data[["97.5%"]]
     )
 
   africa <- giscoR::gisco_get_countries(
@@ -1605,7 +1605,7 @@ if (model_choice == "modelB2") {
   ggplot() +
     geom_errorbarh(
       data = summaries %>% filter(level == "alert"),
-      aes(xmin = q5, xmax = q95, x = median, y = date, color = admin_level),
+      aes(xmin = q25, xmax = q975, x = median, y = date, color = admin_level),
       height = 0.3
     ) +
     geom_point(
@@ -1620,7 +1620,7 @@ if (model_choice == "modelB2") {
         left_join(summaries %>% group_by(country) %>%
                     summarise(min_date = min(date, na.rm = TRUE)), by = "country") %>%
         mutate(plot_date = min_date - 10),
-      aes(xmin = q5, xmax = q95, x = median, y = plot_date),
+      aes(xmin = q25, xmax = q975, x = median, y = plot_date),
       height = 0.5, color = "black", size = 1.2,
       inherit.aes = FALSE
     ) +
@@ -1692,7 +1692,7 @@ plot_alerts_by_country_B3 <- function(summaries) {
   country_positions <- summaries %>%
     filter(level == "country") %>%
     #select(country_iso3, mean, q5, q95) %>%
-    select(country_iso3, median, q5, q95) %>%
+    select(country_iso3, median, q25, q975) %>%
     mutate(plot_date = min(summaries$date[summaries$country_iso3 == country_iso3], na.rm = TRUE) - 10)
 
   summaries <- summaries %>%
@@ -1701,7 +1701,7 @@ plot_alerts_by_country_B3 <- function(summaries) {
   ggplot() +
     geom_errorbarh(
       data = summaries %>% filter(level == "alert"),
-      aes(xmin = q5, xmax = q95, x = median, y = date, color = admin_level),
+      aes(xmin = q25, xmax = q975, x = median, y = date, color = admin_level),
       height = 0.3
     ) +
     geom_point(
@@ -1711,7 +1711,7 @@ plot_alerts_by_country_B3 <- function(summaries) {
     ) +
     geom_errorbarh(
       data = summaries %>% filter(level == "country" & !is.na(plot_date)),
-      aes(xmin = q5, xmax = q95, x = median, y = plot_date),
+      aes(xmin = q25, xmax = q975, x = median, y = plot_date),
       height = 0.5, color = "black", size = 1.2,
       inherit.aes = FALSE
     ) +
@@ -1803,8 +1803,8 @@ if(model_choice == "modelB2"){
     mutate(
       #predicted = mean * delay,
       predicted = median * delay,
-      predicted_low = q5 * delay,
-      predicted_high = q95 * delay,
+      predicted_low = q25 * delay,
+      predicted_high = q975 * delay,
       id_short = case_when(
         level == "alert" & !is.na(alert_index) ~ paste0("alert_", alert_index),
         level == "alert" & is.na(alert_index) ~ "alert",
@@ -1897,13 +1897,13 @@ if (model_choice == "modelB2") {
     group_by(country, alert_id, delay) %>%
     summarise(
       mean = mean(r_rep),
-      q5   = quantile(r_rep, 0.05),
-      q95  = quantile(r_rep, 0.95),
+      q25   = quantile(r_rep, 0.025),
+      q975  = quantile(r_rep, 0.975),
       .groups = "drop"
     )
 
   ggplot(pred_summary, aes(x = delay, y = mean, group = alert_id)) +
-    geom_ribbon(aes(ymin = q5, ymax = q95, group = alert_id),
+    geom_ribbon(aes(ymin = q25, ymax = q975, group = alert_id),
                 fill = "grey70", alpha = 0.2) +
     geom_line(color = "grey40", size = 0.6, alpha = 0.7) +
     geom_point(color = "grey20", size = 1) +
@@ -1949,8 +1949,8 @@ if (model_choice == "modelA2") {
       tidyr::expand_grid(delay = delay_values) %>%
       mutate(
         predicted = median * delay,
-        predicted_low = q5 * delay,
-        predicted_high = q95 * delay,
+        predicted_low = q25 * delay,
+        predicted_high = q975 * delay,
         id_short = ifelse(!is.na(alert_id), alert_id, paste0("alert_", id))
       )
     
@@ -2012,14 +2012,14 @@ if (model_choice == "modelA2") {
     group_by(alert_id, delay) %>%
     summarise(
       mean = mean(r_rep),
-      q5 = quantile(r_rep, 0.05),
-      q95 = quantile(r_rep, 0.95),
+      q25 = quantile(r_rep, 0.025),
+      q975 = quantile(r_rep, 0.975),
       .groups = "drop"
     )
   
   ## plot
   ggplot(pred_summary, aes(x = delay, y = mean, group = alert_id)) +
-    geom_ribbon(aes(ymin = q5, ymax = q95, group = alert_id), 
+    geom_ribbon(aes(ymin = q25, ymax = q975, group = alert_id), 
                 fill = "grey70", alpha = 0.2) +
     geom_line(color = "grey40", size = 0.7, alpha = 0.7) +
     geom_point(color = "grey20", size = 1) +

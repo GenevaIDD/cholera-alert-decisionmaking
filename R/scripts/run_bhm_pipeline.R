@@ -27,7 +27,7 @@ rerun_time_censoring_analysis <- FALSE
 ## BHM specific
 alert_no <- 8 ## choose the alert number you want to run the BHM for the effect of delay
 model_choice <- "modelB2" ## the BHM to use to estimate the effect of delay
-rerun_model <- FALSE
+rerun_model <- TRUE
 do_prior_check <- TRUE ## whether to run prior predictive check 
 compare_epidemic_endemic_posteriors <- FALSE ## whether to compare alpha0 posteriors between transmission settings 
 transform_posterior <- TRUE ## whether to convert posteriors to observation scale: exp(posterior) - 1 (weekly delay effect) 
