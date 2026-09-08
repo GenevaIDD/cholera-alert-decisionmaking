@@ -163,7 +163,9 @@ if(use_filtered_linked){
   linked <- readr::read_rds(paste0(new_dpath, "/linked_outbreaks_alert_groups_", ag_nweeks_code, ".rds"))
 }
 
-pre_extract <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction_public_apr_2025.rds"))
+#pre_extract2 <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction_public_apr_2025.rds"))
+pre_extract <- arrow::read_parquet(file.path(pre_path, "Public_surveillance_dataset.parquet")) %>%
+  rename(location = location_name) ##temp testing with public data
 pre_extract <- dplyr::mutate(pre_extract, pop_brk = cut(pop, breaks = c(0, 50000, 500000, max(pre_extract$pop)), labels = c("<50k", "[50k, 500k)", "\U2265 500k"), include.lowest=T, right=FALSE))
 
 ## optionally remove censored alerts for chosen delay value
@@ -348,9 +350,10 @@ summary_stats
 #| warning: false
 #| eval: true
 
-outbreak_shapes <- readr::read_rds(
-  file.path(pre_path, "public_outbreak_shps.rds")
-)
+# outbreak_shapes2 <- readr::read_rds(file.path(pre_path, "public_outbreak_shps.rds"))
+
+outbreak_shapes <- sf::read_sf(file.path(pre_path, "Public_surveillance_shapefiles.gpkg")) %>%
+  rename(lctn_pr = location_period_id) ##temp testing with public dataset
 
 if (!inherits(outbreak_shapes, "sf")) {
   outbreak_shapes <- sf::st_as_sf(outbreak_shapes)

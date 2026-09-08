@@ -6,22 +6,41 @@ library(tidyverse)
 ## settings
 timeseries_plot <- FALSE ## whether to create a time series of alert groups and outbreaks
 filtered_linkages <- FALSE ## whether to filter linkages using to keep only the overlapping alerts and the manual inspection suggestions (for 'closest before' alerts)
+if (filtered_linkages){
+  removed_overlapping_alert_ids <- c() ##fill in overlapping alert ids to filter linkages, manually identified by exploring time series
+}
+
 
 ## load data
 alert_groups <- readRDS(here::here("data", "alert_groups_nweeks8.rds"))
-time_series_outbreak_extraction <- readRDS(here::here("data", "time_series_outbreak_extraction.rds"))
+#time_series_outbreak_extraction2 <- readRDS(here::here("data", "time_series_outbreak_extraction.rds"))
+time_series_outbreak_extraction <- arrow::read_parquet(here::here("data", "Public_outbreak_dataset.parquet")) %>%
+  rename(location = location_name) ##temp testing w public dataset
 
 ####################  Processing #################### 
 
+# outbreaks <- time_series_outbreak_extraction %>%
+  # group_by(outbreak_UID) %>%
+  # summarize(
+  #   location = first(location),
+  #   total_sCh = sum(sCh),
+  #   population = mean(pop), ## in case the outbreak spans multiple years, take the average population
+  #   outbreak_duration = as.numeric(sum(date_range) / 7), 
+  #   outbreak_start = min(TL),
+  #   outbreak_end = max(TR),
+  #   .groups = "drop"
+  # )
+
+##testing
 outbreaks <- time_series_outbreak_extraction %>%
   group_by(outbreak_UID) %>%
   summarize(
     location = first(location),
     total_sCh = sum(sCh),
     population = mean(pop), ## in case the outbreak spans multiple years, take the average population
-    outbreak_duration = as.numeric(sum(date_range) / 7), 
     outbreak_start = min(TL),
     outbreak_end = max(TR),
+    outbreak_duration = 7, 
     .groups = "drop"
   )
 
@@ -194,9 +213,7 @@ if (filtered_linkages){
   
   ## remove the overlapping alerts where based on manual inspection we decided to keep the closest before instead of the overlap alerts (outbreak_UID: AFR::COD::Haut-Katanga::Kilwa Health District-2016-11-07-2017-02-05)
   selected_linkages <- selected_linkages %>%
-    filter(!alert_id %in% c("a1_AFR::COD::Haut-Katanga::Kilwa Health District_2017-01-09",
-                            "a2_AFR::COD::Haut-Katanga::Kilwa Health District_2017-01-16")
-    )
+    filter(!alert_id %in% removed_overlapping_alert_ids)
   
   ## add in rows for each alert number that was filtered out per outbreak
   

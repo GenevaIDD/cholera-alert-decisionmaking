@@ -28,7 +28,7 @@ ag_nweeks_code <- paste0("nweeks", ag_nweeks)
 evalperiod_code <- paste0("ew", evalperiod)
 delayperiod_code <- paste0("dw", delayperiod)
 remove_censored <- FALSE ## whether to remove censored observations
-retrigger_alerts <- FALSE
+retrigger_alerts <- TRUE
 incl_trend_alerts <- TRUE
 impact_thresh <- 300 
 use_filtered_linked <- FALSE 
@@ -71,6 +71,9 @@ if(remove_censored){
      input = file.path(qmd_path, "check_output_time_censoring.qmd")
    )
 }
+
+## run script to link alerts to outbreaks
+source(here::here("R", "scripts", "explore_linked_outbreaks_and_alert_groups.R"))
 
 ## rendering alert utility score
 quarto::quarto_render(
