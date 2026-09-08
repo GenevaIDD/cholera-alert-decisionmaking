@@ -4,9 +4,9 @@
 library(OutbreakExtractR)
 
 ## directories
-new_dpath <- "../../main_ecl_dec2024/outputs"
+new_dpath <- here::here("data")
 plot_path <- paste0(new_dpath, "/exploratory")
-pre_path <- "../../data/"
+pre_path <- here::here("data")
 qmd_path <- "../../notebooks"
 fig_path <- "../../notebooks/manuscript_figures"
 
@@ -31,7 +31,7 @@ remove_censored <- FALSE ## whether to remove censored observations
 retrigger_alerts <- FALSE
 incl_trend_alerts <- TRUE
 impact_thresh <- 300 
-use_filtered_linked <- TRUE 
+use_filtered_linked <- FALSE 
 ## map to alert utility terminology
 which_setting_alert <- dplyr::case_when(
   transmission_setting == "outbreak-prone" ~ "epidemic",
@@ -62,7 +62,7 @@ alert_utility_file <- paste0("alert_utility_", suffix, ".html")
 
 ## optional: re-trigger alerts, alert groups, and get evaluation files
 if (retrigger_alerts){
-  source("write_alert_outcomes2.R")
+  source(here::here("R", "scripts", "write_alert_outcomes2.R"))
 }
 
 ## render time censoring qmd to get evaluation period censoring estimate per alert

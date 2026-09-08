@@ -16,7 +16,7 @@ params:
   transform_posterior: true 
   rate_ratio_model: false
   remove_censored: false
-  fig_path: "manuscript_figures"
+  fig_path: !expr here::here("notebooks", "manuscript_figures")
 editor: source
 ---
 
@@ -55,17 +55,17 @@ transform_posterior <- params$transform_posterior ## whether to transform poster
 rate_ratio_model <- params$rate_ratio_model
 remove_censored <- params$remove_censored
 fig_path <- params$fig_path ## where we save slope summaries to get manuscript figure 5
-pre_path <- "../data/"
+pre_path <- here::here("data")
 
 ## load stan model
 stan_file <- switch(model_choice,
-  "modelA1" = "../stan/log_ratio_model_A1.stan",
-  "modelA2" = "../stan/log_ratio_model_A2.stan",
-  "modelB" = "../stan/log_ratio_model_B.stan",
-  "modelB2" = "../stan/log_ratio_model_B2.stan",
-  "modelB3" = "../stan/log_ratio_model_B3.stan",  
-  "modelC" = "../stan/log_ratio_model_C.stan",
-  "modelD" = "../stan/log_ratio_model_D.stan",  
+  "modelA1" = here::here("stan", "log_ratio_model_A1.stan"),
+  "modelA2" = here::here("stan", "log_ratio_model_A2.stan"),
+  "modelB" = here::here("stan", "log_ratio_model_B.stan"),
+  "modelB2" = here::here("stan", "log_ratio_model_B2.stan"),
+  "modelB3" = here::here("stan", "log_ratio_model_B3.stan"),  
+  "modelC" = here::here("stan", "log_ratio_model_C.stan"),
+  "modelD" = here::here("stan", "log_ratio_model_D.stan"),  
 )
 
 fit_file <- paste0("fit_", model_choice, "_a", alert_no, "_", pop_group, "_", location_filter,".rds")
@@ -247,7 +247,8 @@ r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
 ## load evaluation data for all delay values
 delays <- seq(from = 0, to = 24, by = 1)
 
-data_list <- map(delays, ~ readRDS(paste0("../../main_ecl_dec2024/outputs/evaluation_cases_dw", ., "_ew52.rds")) %>%
+# line 250
+data_list <- map(delays, ~ readRDS(file.path(pre_path, paste0("evaluation_cases_dw", .x, "_ew52.rds"))) %>%
                    mutate(delay = .x))
 
 data <- bind_rows(data_list)
@@ -320,8 +321,8 @@ data <- data %>%
 if (rate_ratio_model) {
 
   ## load observed weeks
-  observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
-
+  observed_weeks <- readRDS(file.path(pre_path, "evaluation_time_censoring.rds"))
+  
   ## join only the columns we need, avoid duplicate names
   data <- data %>%
     left_join(
@@ -345,8 +346,8 @@ if (rate_ratio_model) {
   ## optionally remove censored alerts
   if (remove_censored) {
 
-    observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
-
+    observed_weeks <- readRDS(file.path(pre_path, "evaluation_time_censoring.rds"))
+  
     data <- data %>%
       left_join(
         observed_weeks %>% select(alert_id, delay, O_weeks),
@@ -700,14 +701,15 @@ priors_list %>%
 all_models <- c("modelA1","modelA2","modelB","modelB2","modelB3","modelC","modelD")
 
 stan_paths <- list(
-  modelA1 = "../stan/log_ratio_model_A1.stan",
-  modelA2 = "../stan/log_ratio_model_A2.stan",
-  modelB  = "../stan/log_ratio_model_B.stan",
-  modelB2 = "../stan/log_ratio_model_B2.stan",
-  modelB3 = "../stan/log_ratio_model_B3.stan",
-  modelC  = "../stan/log_ratio_model_C.stan",
-  modelD  = "../stan/log_ratio_model_D.stan"
+  modelA1 = here::here("stan", "log_ratio_model_A1.stan"),
+  modelA2 = here::here("stan", "log_ratio_model_A2.stan"),
+  modelB  = here::here("stan", "log_ratio_model_B.stan"),
+  modelB2 = here::here("stan", "log_ratio_model_B2.stan"),
+  modelB3 = here::here("stan", "log_ratio_model_B3.stan"),
+  modelC  = here::here("stan", "log_ratio_model_C.stan"),
+  modelD  = here::here("stan", "log_ratio_model_D.stan")
 )
+
 
 model_descriptions <- list(
   modelA1 = "A1",

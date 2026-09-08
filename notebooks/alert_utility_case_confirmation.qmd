@@ -46,10 +46,10 @@ library(ggpubr)
 library(purrr)
 library(stringr)
 
-
-new_dpath <- "../data"
-plot_path <- paste0(new_dpath, "/exploratory")
-pre_path <- "../data/"
+## directories
+new_dpath <- here::here("data")
+plot_path <- file.path(new_dpath, "exploratory")
+pre_path <- here::here("data")
 
 testing <- params$testing ## process the testing dataset or full evaluation of outbreaks
 test_cntry <- if(testing){"COD"}
@@ -1631,7 +1631,7 @@ print(compare_to_baseline_plot)
 compare_case_alerts_to_50weekly_blackline <- function(
   popgroup,
   which_setting = "epidemic",
-  pre_path = "C:/Users/chalam/Documents/outbreaks_project/main_ecl_dec2024/inputs",
+  pre_path = here::here("data"),
   thresholds = 0:5
 ) {
 

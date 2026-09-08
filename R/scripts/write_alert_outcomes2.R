@@ -24,8 +24,8 @@ alert_columns <- paste0("alert", 1:24) ## unique alert columns
 
 ## change orig_dpath to the location of the preoutbreak extractions
 ## change new_dpath to the location where alert and outcome summary data are stored
-orig_dpath <- "../../data"
-new_dpath <- "../../data"
+orig_dpath <- here::here("data")
+new_dpath <- here::here("data")
 
 ########## Write Alerts ########## 
 

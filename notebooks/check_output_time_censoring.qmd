@@ -16,7 +16,7 @@ library(scales)
 library(stringr)
 
 ## load preoutbreak time series data
-pre_path: "../data/"
+pre_path <- here::here("data") 
 preout <- readRDS(file.path(pre_path, "time_series_preoutbreak_extraction_public_apr_2025.rds"))
 
 location_tr <- preout %>%

@@ -19,12 +19,12 @@ params:
   ag_nweeks_code: "nweeks8"
   incl_trend_alerts: true
   impact_thresh: 300 
-  use_filtered_linked: true 
+  use_filtered_linked: false 
   which_setting: "epidemic"
-  new_dpath: "../../main_ecl_dec2024/outputs"
-  plot_path: paste0(new_dpath, "/exploratory")
-  pre_path: "../data/" 
-  fig_path: "manuscript_figures"
+  new_dpath: !expr here::here("data")
+  plot_path: !expr paste0(here::here("data"), "/exploratory")
+  pre_path: !expr here::here("data") 
+  fig_path: !expr here::here("notebooks", "manuscript_figures")
   use_iqr: false
   ocv_status: "all"
 execute:
@@ -83,6 +83,14 @@ use_iqr <- params$use_iqr
 
 ## whether to run pipeline with all locations, vaccinated ones, or unvaccinated ones
 ocv_status <- params$ocv_status ## choose one of: "all", "vaccinated", "unvaccinated"
+
+##debug paths
+# --- TEMP DEBUG ---
+cat("new_dpath =", new_dpath, "\n")
+cat("class =", class(new_dpath), "\n")
+cat("file.exists check =", file.exists(file.path(new_dpath, "alerts.rds")), "\n")
+cat("constructed path =", paste0(new_dpath, "/alerts.rds"), "\n")
+# --- END DEBUG ---
 
 ```
 
@@ -161,7 +169,7 @@ pre_extract <- dplyr::mutate(pre_extract, pop_brk = cut(pop, breaks = c(0, 50000
 ## optionally remove censored alerts for chosen delay value
 if (remove_censored) {
 
-  observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
+  observed_weeks <- readRDS(file.path(new_dpath, "evaluation_time_censoring.rds"))
 
   ## keep only the delay corresponding to delayperiod_code
   chosen_delay <- as.numeric(gsub("dw", "", delayperiod_code))
@@ -341,7 +349,7 @@ summary_stats
 #| eval: true
 
 outbreak_shapes <- readr::read_rds(
-  file.path(pre_path, "outbreak_shapefiles.rds")
+  file.path(pre_path, "public_outbreak_shps.rds")
 )
 
 if (!inherits(outbreak_shapes, "sf")) {
@@ -808,7 +816,8 @@ fig_complete_dat <- dplyr::full_join(fig_impact_dat, fig_eff_dat, by = c("alert_
 ## 30 Oct save as file to compare epidemic/endemic locations and test for statistically significant differences
 add_setting_and_save <- function(df, name) {
   df$which_setting <- which_setting
-  saveRDS(df, paste0(pre_path, name, which_setting, ".rds"))
+  #saveRDS(df, paste0(pre_path, name, which_setting, ".rds"))
+  saveRDS(df, file.path(pre_path, paste0(name, which_setting, ".rds")))
 }
 
 add_setting_and_save(fig_complete_dat, "compare_significant_missed_ppv_chisquare_")
@@ -1128,6 +1137,7 @@ gridExtra::grid.arrange(impact_lineplot(fig_over_500k), eff_lineplot(fig_over_50
 
 ```{r}
 #| results: asis
+#| eval: false
 
 ## Combined Endemic vs Epidemic comparisons (Wilcoxon and Chi-square/Fisher)
 
@@ -1143,7 +1153,8 @@ metric_cols <- list(
 
 for (metric in wilcox_metrics) {
   files <- setNames(
-    paste0(pre_path, "compare_significant_", metric, "_testmeans_", settings, ".rds"),
+    #paste0(pre_path, "compare_significant_", metric, "_testmeans_", settings, ".rds"),
+    file.path(pre_path, paste0("compare_significant_", metric, "_testmeans_", settings, ".rds")),
     settings
   )
   if (!all(file.exists(files))) next
@@ -1214,7 +1225,8 @@ metric_file <- "compare_significant_missed_ppv_chisquare_"
 
 for (metric in chisq_metrics) {
   files <- setNames(
-    paste0(pre_path, metric_file, settings, ".rds"),
+    #paste0(pre_path, metric_file, settings, ".rds"),
+    file.path(pre_path, paste0(metric_file, settings, ".rds")),
     settings
   )
   if (!all(file.exists(files))) next
