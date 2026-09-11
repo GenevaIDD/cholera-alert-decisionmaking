@@ -13,9 +13,10 @@ if (filtered_linkages){
 
 ## load data
 alert_groups <- readRDS(here::here("data", "alert_groups_nweeks8.rds"))
-#time_series_outbreak_extraction2 <- readRDS(here::here("data", "time_series_outbreak_extraction.rds"))
+##time_series_outbreak_extraction <- readRDS(here::here("data", "time_series_outbreak_extraction.rds")) ## to run full dataset
+
 time_series_outbreak_extraction <- arrow::read_parquet(here::here("data", "Public_outbreak_dataset.parquet")) %>%
-  rename(location = location_name) ##temp testing w public dataset
+  rename(location = location_name) 
 
 ####################  Processing #################### 
 
@@ -101,7 +102,9 @@ if (timeseries_plot){
   plot_dir <- here::here("notebooks", "manuscript_figures")  
   
   ## load time series data
-  time_series <- readRDS(here::here("data", "time_series_preoutbreak_extraction_public_apr_2025.rds"))  
+  ## time_series <- readRDS(here::here("data", "time_series_preoutbreak_extraction.rds")) ## to run full dataset
+  time_series <- arrow::read_parquet(here::here("data","Public_surveillance_dataset.parquet")) %>%
+    rename(location = location_name)
   
   ## add country to outbreaks alerts join
   outbreak_data <- outbreaks_alerts_join %>%

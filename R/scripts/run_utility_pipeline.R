@@ -31,7 +31,7 @@ remove_censored <- FALSE ## whether to remove censored observations
 retrigger_alerts <- TRUE
 incl_trend_alerts <- TRUE
 impact_thresh <- 300 
-use_filtered_linked <- FALSE 
+use_filtered_linked <- TRUE 
 ## map to alert utility terminology
 which_setting_alert <- dplyr::case_when(
   transmission_setting == "outbreak-prone" ~ "epidemic",

@@ -290,7 +290,9 @@ data <- data %>%
   tidyr::extract(alert_id, into = "year", regex = "_(\\d{4})", remove = FALSE)
 
 ## load population data to select only required population group
-ts_population <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction_public_apr_2025.rds"))%>%
+##ts_population <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction.rds"))%>% ## use this version to run the full dataset
+ts_population <- arrow::read_parquet(file.path(pre_path, "Public_surveillance_dataset.parquet")) %>%
+  rename(location = location_name) %>%
   transmute(location, year = as.character(year(TL)), pop) %>%
   distinct() %>%
   group_by(year, location) %>%
@@ -937,7 +939,7 @@ posterior_summaries
 ```{r}
 #| label: traceplots
 #| code-fold: true
-#| eval: true
+#| eval: false
 
 # ## helper function to plot traceplots for n random indices of a vector parameter
 plot_random_indices <- function(fit, param, n = 3) {
