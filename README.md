@@ -12,7 +12,12 @@ Alam C, Zheng Q, Perez-Saez J, Kim J-H, Azman AS, Lee EC. "A Decision Analytic F
 
 ## Data
 
-We include a version of the original dataset with only publicly available data to re-run analyses. We do not expect users will be able to exactly recreate the results in the original paper, which used a dataset including public and non-public data.
+Download the following files (which include only public data) and place them in the data directory to re-run analyses. We do not expect users will be able to exactly recreate the results in the original paper, which used a dataset including public and non-public data.
+
+Repository: [Cholera surveillance time series in Africa from 2010 to 2023](https://osf.io/2ncf7/overview)
+Files: [Public_surveillance_dataset.parquet](https://osf.io/2ncf7/files/w8s7x)
+       [Public_oubtreak_dataset.parquet](https://osf.io/2ncf7/files/tuhx5)
+       [Public_surveillance_shapefiles.gkpg](https://osf.io/2ncf7/files/s6z8y)
 
 ## Dependencies
 
