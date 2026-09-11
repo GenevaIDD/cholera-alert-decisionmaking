@@ -4,9 +4,9 @@
 library(OutbreakExtractR)
 
 ## directories
-new_dpath <- "../../main_ecl_dec2024/outputs"
+new_dpath <- here::here("data")
 plot_path <- paste0(new_dpath, "/exploratory")
-pre_path <- "../../data/"
+pre_path <- here::here("data")
 qmd_path <- "../../notebooks"
 fig_path <- "../../notebooks/manuscript_figures"
 
@@ -28,7 +28,7 @@ ag_nweeks_code <- paste0("nweeks", ag_nweeks)
 evalperiod_code <- paste0("ew", evalperiod)
 delayperiod_code <- paste0("dw", delayperiod)
 remove_censored <- FALSE ## whether to remove censored observations
-retrigger_alerts <- FALSE
+retrigger_alerts <- TRUE
 incl_trend_alerts <- TRUE
 impact_thresh <- 300 
 use_filtered_linked <- TRUE 
@@ -62,7 +62,7 @@ alert_utility_file <- paste0("alert_utility_", suffix, ".html")
 
 ## optional: re-trigger alerts, alert groups, and get evaluation files
 if (retrigger_alerts){
-  source("write_alert_outcomes2.R")
+  source(here::here("R", "scripts", "write_alert_outcomes2.R"))
 }
 
 ## render time censoring qmd to get evaluation period censoring estimate per alert
@@ -71,6 +71,9 @@ if(remove_censored){
      input = file.path(qmd_path, "check_output_time_censoring.qmd")
    )
 }
+
+## run script to link alerts to outbreaks
+source(here::here("R", "scripts", "explore_linked_outbreaks_and_alert_groups.R"))
 
 ## rendering alert utility score
 quarto::quarto_render(

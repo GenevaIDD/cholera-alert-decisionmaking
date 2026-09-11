@@ -24,15 +24,17 @@ alert_columns <- paste0("alert", 1:24) ## unique alert columns
 
 ## change orig_dpath to the location of the preoutbreak extractions
 ## change new_dpath to the location where alert and outcome summary data are stored
-orig_dpath <- "../../data"
-new_dpath <- "../../data"
+orig_dpath <- here::here("data")
+new_dpath <- here::here("data")
 
 ########## Write Alerts ########## 
 
 if(testing & !file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".rds")))){
   print("Processing alerts for testing data")
   
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## includes obs without location periods
+  ##ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## to run full dataset
+  ct_clean_export <- arrow::read_parquet(file.path(orig_dpath, "Public_surveillance_dataset.parquet")) %>%
+    rename(location = location_name) 
   ct_clean_export <- dplyr::filter(ct_clean_export, country == test_cntry)
   
   ## averaging duplicates with existing OutbreakExtractR function
@@ -63,12 +65,15 @@ if(testing & !file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".r
 
 } else if(testing & file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".rds")))){
   ct <- readr::read_rds(file.path(new_dpath, paste0("alerts_", test_cntry, ".rds")))
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## needed to calculate cases in evaluation period
+  ##ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## to run full dataset
+  ct_clean_export <- arrow::read_parquet(file.path(orig_dpath, "Public_surveillance_dataset.parquet")) %>%
+    rename(location = location_name)
 } else if(!testing & !file.exists(file.path(new_dpath, "alerts.rds"))){
   print("Processing alerts for all data")
   
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## includes obs without location periods
-  
+  ##ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## to run full dataset
+  ct_clean_export <- arrow::read_parquet(file.path(orig_dpath, "Public_surveillance_dataset.parquet")) %>%
+    rename(location = location_name)
   ## averaging duplicates with existing OutbreakExtractR function
   if(any(duplicated(ct_clean_export))){
     ct_clean_export <- OutbreakExtractR::average_duplicate_observations(ct_clean_export)
@@ -97,7 +102,9 @@ if(testing & !file.exists(file.path(new_dpath, paste0("alerts_", test_cntry, ".r
 
 } else{
   ct <- readr::read_rds(file.path(new_dpath, "alerts.rds"))
-  ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction_public_apr_2025.rds"))  ## needed to calculate cases in evaluation period
+  ##ct_clean_export <- readRDS(file.path(orig_dpath, "time_series_preoutbreak_extraction.rds"))  ## to run full dataset
+  ct_clean_export <- arrow::read_parquet(file.path(orig_dpath, "Public_surveillance_dataset.parquet")) %>%
+    rename(location = location_name)
 }
 
 ########## Write Alert Groups ########## 

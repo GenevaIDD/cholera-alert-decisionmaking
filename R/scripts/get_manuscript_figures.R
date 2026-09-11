@@ -362,7 +362,7 @@ custom_order <- c(
   "1-week", "2-week", "3-week", 
   "≥ 2 weekly", "≥ 5 weekly", "≥ 10 weekly", "≥ 25 weekly", "≥ 50 weekly", "≥ 100 weekly", "≥ 250 weekly",
   "≥ 5 total", "≥ 10 total", "≥ 25 total", "≥ 50 total", "≥ 100 total", "≥ 500 total", "≥ 1000 total",
-  "≥ .5 per 10K", "≥ 1 per 10K", "≥ 1.5 per 10K", "≥ 2.5 per 10K", "≥ 5 per 10K", "≥ 7.5 per 10K"
+  "≥ .25 per 10K", "≥ .5 per 10K", "≥ 1 per 10K", "≥ 1.5 per 10K", "≥ 2.5 per 10K", "≥ 5 per 10K", "≥ 7.5 per 10K"
 )
 
 ## pooled outbreak-prone
@@ -521,8 +521,8 @@ global_medians <- slopes_df %>%
 
 country_raw <- slopes_df %>%
   filter(level == "country_raw") %>%
-  select(country, pop_group, median, q5, q95) %>%
-  mutate(significant = !(q5 <= 0 & q95 >= 0))
+  select(country, pop_group, median, q25, q975) %>%
+  mutate(significant = !(q25 <= 0 & q975 >= 0))
 
 country_slopes <- slopes_df %>%
   filter(level == "country") %>%

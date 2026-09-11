@@ -1,11 +1,11 @@
 ## This is master script that runs the analyses of alert outcomes to run the sensitivity to delay models
 
 ## directories
-new_dpath <- "../../main_ecl_dec2024/outputs"
+new_dpath <- here::here("data")
 plot_path <- paste0(new_dpath, "/exploratory")
-pre_path <- "../../main_ecl_dec2024/inputs/"
-qmd_path <- "../../notebooks"
-fig_path <- "../../notebooks/manuscript_figures"
+pre_path <- here::here("data")
+qmd_path <- here::here("notebooks")
+fig_path <- here::here("notebooks", "manuscript_figures")
 
 ## in case directory for figure creation does not exist yet
 if (!dir.exists(fig_path)) {
@@ -54,7 +54,7 @@ log_ratio_models_file <- paste0("log_ratio_models_", suffix, ".html")
 ## optional: re-trigger alerts, alert groups, and get evaluation files
 if (retrigger_alerts){
   message("re-triggering alert and outcomes")
-  source("write_alert_outcomes2.R")
+  source(here::here("R", "scripts", "write_alert_outcomes2.R"))
 }
 
 ## render time censoring qmd to get evaluation period censoring estimate per alert/delay value

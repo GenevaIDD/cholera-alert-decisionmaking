@@ -16,7 +16,7 @@ params:
   transform_posterior: true 
   rate_ratio_model: false
   remove_censored: false
-  fig_path: "manuscript_figures"
+  fig_path: !expr here::here("notebooks", "manuscript_figures")
 editor: source
 ---
 
@@ -55,16 +55,17 @@ transform_posterior <- params$transform_posterior ## whether to transform poster
 rate_ratio_model <- params$rate_ratio_model
 remove_censored <- params$remove_censored
 fig_path <- params$fig_path ## where we save slope summaries to get manuscript figure 5
+pre_path <- here::here("data")
 
 ## load stan model
 stan_file <- switch(model_choice,
-  "modelA1" = "../stan/log_ratio_model_A1.stan",
-  "modelA2" = "../stan/log_ratio_model_A2.stan",
-  "modelB" = "../stan/log_ratio_model_B.stan",
-  "modelB2" = "../stan/log_ratio_model_B2.stan",
-  "modelB3" = "../stan/log_ratio_model_B3.stan",  
-  "modelC" = "../stan/log_ratio_model_C.stan",
-  "modelD" = "../stan/log_ratio_model_D.stan",  
+  "modelA1" = here::here("stan", "log_ratio_model_A1.stan"),
+  "modelA2" = here::here("stan", "log_ratio_model_A2.stan"),
+  "modelB" = here::here("stan", "log_ratio_model_B.stan"),
+  "modelB2" = here::here("stan", "log_ratio_model_B2.stan"),
+  "modelB3" = here::here("stan", "log_ratio_model_B3.stan"),  
+  "modelC" = here::here("stan", "log_ratio_model_C.stan"),
+  "modelD" = here::here("stan", "log_ratio_model_D.stan"),  
 )
 
 fit_file <- paste0("fit_", model_choice, "_a", alert_no, "_", pop_group, "_", location_filter,".rds")
@@ -246,7 +247,8 @@ r_i \sim N(\mu_i,\sigma), \qquad \sigma \sim \text{HalfNormal}(1)
 ## load evaluation data for all delay values
 delays <- seq(from = 0, to = 24, by = 1)
 
-data_list <- map(delays, ~ readRDS(paste0("../../main_ecl_dec2024/outputs/evaluation_cases_dw", ., "_ew52.rds")) %>%
+# line 250
+data_list <- map(delays, ~ readRDS(file.path(pre_path, paste0("evaluation_cases_dw", .x, "_ew52.rds"))) %>%
                    mutate(delay = .x))
 
 data <- bind_rows(data_list)
@@ -288,7 +290,9 @@ data <- data %>%
   tidyr::extract(alert_id, into = "year", regex = "_(\\d{4})", remove = FALSE)
 
 ## load population data to select only required population group
-ts_population <- readRDS("../../main_ecl_dec2024/inputs/time_series_preoutbreak_extraction.rds") %>%
+##ts_population <- readr::read_rds(file.path(pre_path, "time_series_preoutbreak_extraction.rds"))%>% ## use this version to run the full dataset
+ts_population <- arrow::read_parquet(file.path(pre_path, "Public_surveillance_dataset.parquet")) %>%
+  rename(location = location_name) %>%
   transmute(location, year = as.character(year(TL)), pop) %>%
   distinct() %>%
   group_by(year, location) %>%
@@ -319,8 +323,8 @@ data <- data %>%
 if (rate_ratio_model) {
 
   ## load observed weeks
-  observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
-
+  observed_weeks <- readRDS(file.path(pre_path, "evaluation_time_censoring.rds"))
+  
   ## join only the columns we need, avoid duplicate names
   data <- data %>%
     left_join(
@@ -344,8 +348,8 @@ if (rate_ratio_model) {
   ## optionally remove censored alerts
   if (remove_censored) {
 
-    observed_weeks <- readRDS("../../main_ecl_dec2024/outputs/evaluation_time_censoring.rds")
-
+    observed_weeks <- readRDS(file.path(pre_path, "evaluation_time_censoring.rds"))
+  
     data <- data %>%
       left_join(
         observed_weeks %>% select(alert_id, delay, O_weeks),
@@ -699,14 +703,15 @@ priors_list %>%
 all_models <- c("modelA1","modelA2","modelB","modelB2","modelB3","modelC","modelD")
 
 stan_paths <- list(
-  modelA1 = "../stan/log_ratio_model_A1.stan",
-  modelA2 = "../stan/log_ratio_model_A2.stan",
-  modelB  = "../stan/log_ratio_model_B.stan",
-  modelB2 = "../stan/log_ratio_model_B2.stan",
-  modelB3 = "../stan/log_ratio_model_B3.stan",
-  modelC  = "../stan/log_ratio_model_C.stan",
-  modelD  = "../stan/log_ratio_model_D.stan"
+  modelA1 = here::here("stan", "log_ratio_model_A1.stan"),
+  modelA2 = here::here("stan", "log_ratio_model_A2.stan"),
+  modelB  = here::here("stan", "log_ratio_model_B.stan"),
+  modelB2 = here::here("stan", "log_ratio_model_B2.stan"),
+  modelB3 = here::here("stan", "log_ratio_model_B3.stan"),
+  modelC  = here::here("stan", "log_ratio_model_C.stan"),
+  modelD  = here::here("stan", "log_ratio_model_D.stan")
 )
+
 
 model_descriptions <- list(
   modelA1 = "A1",
@@ -934,7 +939,7 @@ posterior_summaries
 ```{r}
 #| label: traceplots
 #| code-fold: true
-#| eval: true
+#| eval: false
 
 # ## helper function to plot traceplots for n random indices of a vector parameter
 plot_random_indices <- function(fit, param, n = 3) {
@@ -1333,16 +1338,16 @@ summarize_effective_slopes <- function(fit, model_choice, prep, transform_poster
   summarize_draws_df <- function(x) {
     tibble(
       median = apply(x, 2, median),
-      q5   = apply(x, 2, quantile, 0.05),
-      q95  = apply(x, 2, quantile, 0.95)
+      q25   = apply(x, 2, quantile, 0.025),
+      q975  = apply(x, 2, quantile, 0.975)
     )
   }
 
   ## global
   global <- tibble(
     median = median(draws$alpha0),
-    q5     = quantile(draws$alpha0, 0.05),
-    q95    = quantile(draws$alpha0, 0.95),
+    q25     = quantile(draws$alpha0, 0.025),
+    q975    = quantile(draws$alpha0, 0.975),
     level  = "global",
     id     = "global"
   )
@@ -1473,8 +1478,8 @@ slope_summaries2 <- df_for_plot %>%
   select(
     id = Parameter,
     median = Median,
-    q5 = `2.5%`,
-    q95 = `97.5%`
+    q25 = `2.5%`,
+    q975 = `97.5%`
   ) %>%
   mutate(
     level = case_when(
@@ -1492,7 +1497,7 @@ plot_effective_slopes <- function(slope_summaries, title = "Posterior effects") 
 
   ggplot(slope_summaries, aes(x = median, y = id, color = level)) +
     geom_point(size = 2.5) +
-    geom_errorbarh(aes(xmin = q5, xmax = q95), height = 0.2, linewidth = 0.6) +
+    geom_errorbarh(aes(xmin = q25, xmax = q975), height = 0.2, linewidth = 0.6) +
     
     # global reference line (if exists)
     geom_vline(
@@ -1530,8 +1535,8 @@ if (model_choice %in% c("modelB", "modelB2", "modelB3")) {
     dplyr::mutate(
       country_code = gsub("^Country: (.+) \\(% change\\)$", "\\1", .data[["Parameter"]]),
       perc_change = .data[["Median"]],   
-      perc_q5    = .data[["2.5%"]],
-      perc_q95   = .data[["97.5%"]]
+      perc_q25    = .data[["2.5%"]],
+      perc_q975   = .data[["97.5%"]]
     )
 
   africa <- giscoR::gisco_get_countries(
@@ -1602,7 +1607,7 @@ if (model_choice == "modelB2") {
   ggplot() +
     geom_errorbarh(
       data = summaries %>% filter(level == "alert"),
-      aes(xmin = q5, xmax = q95, x = median, y = date, color = admin_level),
+      aes(xmin = q25, xmax = q975, x = median, y = date, color = admin_level),
       height = 0.3
     ) +
     geom_point(
@@ -1617,7 +1622,7 @@ if (model_choice == "modelB2") {
         left_join(summaries %>% group_by(country) %>%
                     summarise(min_date = min(date, na.rm = TRUE)), by = "country") %>%
         mutate(plot_date = min_date - 10),
-      aes(xmin = q5, xmax = q95, x = median, y = plot_date),
+      aes(xmin = q25, xmax = q975, x = median, y = plot_date),
       height = 0.5, color = "black", size = 1.2,
       inherit.aes = FALSE
     ) +
@@ -1689,7 +1694,7 @@ plot_alerts_by_country_B3 <- function(summaries) {
   country_positions <- summaries %>%
     filter(level == "country") %>%
     #select(country_iso3, mean, q5, q95) %>%
-    select(country_iso3, median, q5, q95) %>%
+    select(country_iso3, median, q25, q975) %>%
     mutate(plot_date = min(summaries$date[summaries$country_iso3 == country_iso3], na.rm = TRUE) - 10)
 
   summaries <- summaries %>%
@@ -1698,7 +1703,7 @@ plot_alerts_by_country_B3 <- function(summaries) {
   ggplot() +
     geom_errorbarh(
       data = summaries %>% filter(level == "alert"),
-      aes(xmin = q5, xmax = q95, x = median, y = date, color = admin_level),
+      aes(xmin = q25, xmax = q975, x = median, y = date, color = admin_level),
       height = 0.3
     ) +
     geom_point(
@@ -1708,7 +1713,7 @@ plot_alerts_by_country_B3 <- function(summaries) {
     ) +
     geom_errorbarh(
       data = summaries %>% filter(level == "country" & !is.na(plot_date)),
-      aes(xmin = q5, xmax = q95, x = median, y = plot_date),
+      aes(xmin = q25, xmax = q975, x = median, y = plot_date),
       height = 0.5, color = "black", size = 1.2,
       inherit.aes = FALSE
     ) +
@@ -1800,8 +1805,8 @@ if(model_choice == "modelB2"){
     mutate(
       #predicted = mean * delay,
       predicted = median * delay,
-      predicted_low = q5 * delay,
-      predicted_high = q95 * delay,
+      predicted_low = q25 * delay,
+      predicted_high = q975 * delay,
       id_short = case_when(
         level == "alert" & !is.na(alert_index) ~ paste0("alert_", alert_index),
         level == "alert" & is.na(alert_index) ~ "alert",
@@ -1894,13 +1899,13 @@ if (model_choice == "modelB2") {
     group_by(country, alert_id, delay) %>%
     summarise(
       mean = mean(r_rep),
-      q5   = quantile(r_rep, 0.05),
-      q95  = quantile(r_rep, 0.95),
+      q25   = quantile(r_rep, 0.025),
+      q975  = quantile(r_rep, 0.975),
       .groups = "drop"
     )
 
   ggplot(pred_summary, aes(x = delay, y = mean, group = alert_id)) +
-    geom_ribbon(aes(ymin = q5, ymax = q95, group = alert_id),
+    geom_ribbon(aes(ymin = q25, ymax = q975, group = alert_id),
                 fill = "grey70", alpha = 0.2) +
     geom_line(color = "grey40", size = 0.6, alpha = 0.7) +
     geom_point(color = "grey20", size = 1) +
@@ -1946,8 +1951,8 @@ if (model_choice == "modelA2") {
       tidyr::expand_grid(delay = delay_values) %>%
       mutate(
         predicted = median * delay,
-        predicted_low = q5 * delay,
-        predicted_high = q95 * delay,
+        predicted_low = q25 * delay,
+        predicted_high = q975 * delay,
         id_short = ifelse(!is.na(alert_id), alert_id, paste0("alert_", id))
       )
     
@@ -2009,14 +2014,14 @@ if (model_choice == "modelA2") {
     group_by(alert_id, delay) %>%
     summarise(
       mean = mean(r_rep),
-      q5 = quantile(r_rep, 0.05),
-      q95 = quantile(r_rep, 0.95),
+      q25 = quantile(r_rep, 0.025),
+      q975 = quantile(r_rep, 0.975),
       .groups = "drop"
     )
   
   ## plot
   ggplot(pred_summary, aes(x = delay, y = mean, group = alert_id)) +
-    geom_ribbon(aes(ymin = q5, ymax = q95, group = alert_id), 
+    geom_ribbon(aes(ymin = q25, ymax = q975, group = alert_id), 
                 fill = "grey70", alpha = 0.2) +
     geom_line(color = "grey40", size = 0.7, alpha = 0.7) +
     geom_point(color = "grey20", size = 1) +
